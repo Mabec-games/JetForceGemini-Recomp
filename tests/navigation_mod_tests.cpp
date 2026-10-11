@@ -175,6 +175,15 @@ int main(int argc, char **argv) {
     m.put16(0x8010C048U,100U);put32(0x8002B484U,0);check(!scripted_camera_active(m,player));
     put32(0x8002B484U,0x8E0505C0U);put32(control+0x5C0U,0x80400000U);check(!scripted_camera_active(m,player));
     put32(control+0x5C0U,0);
+    check(pc_gameplay_active(m,player));
+    for(auto offset:{0x56BU,0x577U,0x1F9U,0x1FAU,0x186U,0x198U,0x5EEU,0x10DU,0x19FU}) {
+      put8(control+offset,1);check(!pc_gameplay_active(m,player));
+      put8(control+offset,0);check(pc_gameplay_active(m,player));
+    }
+    put32(control+0xFCU,0x8010C000U);check(!pc_gameplay_active(m,player));
+    put32(control+0xFCU,0);check(pc_gameplay_active(m,player));
+    put32(0x800F6DBCU,1);check(!pc_gameplay_active(m,player));
+    put32(0x800F6DBCU,0);check(pc_gameplay_active(m,player));
     put32(player + 0x4CU, props);
     put32(0x800FD7D4U, game);
     m.put16(game + 0x15EU, 6U);

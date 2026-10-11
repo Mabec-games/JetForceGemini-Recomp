@@ -1233,6 +1233,19 @@ inline bool gameplay_active(const Memory &m, std::uint32_t player) {
          m.u32(0x801045B8U) == 0U && m.u32(0x800F6DBCU) == 0U;
 }
 
+// PC view ownership must honor the character's own input locks before its
+// update publishes 0x800F6DBC. Pickups/dialogue and scripted actor control can
+// leave the general gameplay/camera flags clear at the outer player boundary.
+inline bool pc_gameplay_active(const Memory &m, std::uint32_t player) {
+  if(!gameplay_active(m,player) || scripted_camera_active(m,player))return false;
+  const auto control=m.u32(player+0x68U);
+  if(!m.valid(control,0x5F0U) || m.u32(control+0xFCU)!=0U)return false;
+  // Shared by Vela, Juno and Lupus before their native read-input call.
+  for(auto offset:{0x56BU,0x577U,0x1F9U,0x1FAU,0x186U,0x198U,0x5EEU,0x10DU,0x19FU})
+    if(m.u8(control+offset)!=0U)return false;
+  return true;
+}
+
 inline bool transition_confirmation(const Memory &m) {
   // Supported US ROM: mainChangeLevel sets this prompt flag and pause mode;
   // its update routine consumes A/Start before beginning the level load.

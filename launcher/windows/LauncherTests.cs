@@ -364,6 +364,20 @@ namespace JfgLauncher
                 Reject(delegate { LocalSetup.ValidateRom(new MemoryStream(fixture), fixture.Length, new string('0', 40)); }, "wrong hash accepted");
                 fixture[0] = 0x37;
                 Reject(delegate { LocalSetup.ValidateRom(new MemoryStream(fixture), fixture.Length, hash); }, "wrong byte order accepted");
+                string importProfile = Path.Combine(directory, "import-profile");
+                string importSource = Path.Combine(directory, "import-source.z64");
+                File.WriteAllBytes(importSource, Fixture());
+                string imported = ImportedRom.ImportVerified(importProfile, importSource, Fixture().Length, hash);
+                File.Delete(importSource);
+                Check(File.Exists(imported), "import still depended on the original file");
+                Check(ImportedRom.ImportVerified(importProfile, imported, Fixture().Length, hash) == imported, "relaunch lost imported ROM");
+                File.WriteAllBytes(importSource, new byte[12]);
+                Reject(delegate { ImportedRom.ImportVerified(importProfile, importSource, Fixture().Length, hash); }, "invalid import accepted");
+                using (var importedCheck = File.OpenRead(imported))
+                    Check(LocalSetup.Digest(importedCheck) == hash, "failed import damaged existing ROM");
+                Check(Directory.GetFiles(Path.GetDirectoryName(imported), "*.tmp").Length == 0, "failed import left temporary data");
+                File.WriteAllBytes(importSource, Fixture());
+                Reject(delegate { ImportedRom.Import(importProfile, importSource); }, "production import accepted a synthetic ROM");
                 string wrongRom = Path.Combine(directory, "synthetic.z64");
                 File.WriteAllBytes(wrongRom, Fixture());
                 Reject(delegate { using (LocalSetup.OpenVerifiedRom(wrongRom)) { } }, "production validation accepted synthetic ROM");
@@ -384,6 +398,39 @@ namespace JfgLauncher
                 File.WriteAllBytes(game, Pe());
                 File.WriteAllBytes(Path.Combine(directory, "SDL2.dll"), Pe());
                 Check(LocalSetup.PreferredRuntime(directory, "saved runtime") == game, "paired native build not selected");
+                string packageLauncher = Path.Combine(directory, "JFG-Launcher.exe");
+                File.WriteAllBytes(packageLauncher, Pe());
+                string packagePath = Path.Combine(directory, "jfg-package.json");
+                Reject(delegate { PortablePackage.Resolve(packageLauncher); }, "missing package manifest accepted");
+                foreach (string member in PortablePackage.RuntimeFiles)
+                    if (!File.Exists(Path.Combine(directory, member))) File.WriteAllBytes(Path.Combine(directory, member), Pe());
+                var packageEntries = new System.Collections.Generic.List<string>();
+                foreach (string member in PortablePackage.RuntimeFiles)
+                {
+                    string memberPath = Path.Combine(directory, member);
+                    packageEntries.Add("{\"name\":\"" + member + "\",\"size\":" + new FileInfo(memberPath).Length + ",\"sha256\":\"" + SupportSession.Hash(memberPath) + "\"}");
+                }
+                string packageJson = "{\"schema\":1,\"version\":\"1.0.1-beta.1\",\"files\":[" + String.Join(",", packageEntries.ToArray()) + "]}";
+                File.WriteAllText(packagePath, packageJson);
+                Check(PortablePackage.Resolve(packageLauncher) == game, "complete bundled package rejected");
+                foreach (string crt in new string[] { "concrt140.dll", "msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll", "msvcp140_atomic_wait.dll", "msvcp140_codecvt_ids.dll", "vccorlib140.dll", "vcruntime140.dll", "vcruntime140_1.dll", "vcruntime140_threads.dll" }) {
+                    string member = Path.Combine(directory, crt);
+                    File.Delete(member);
+                    Reject(delegate { PortablePackage.Resolve(packageLauncher); }, "missing bundled CRT accepted: " + crt);
+                    File.WriteAllBytes(member, Pe());
+                }
+                File.AppendAllText(Path.Combine(directory, "SDL2.dll"), "changed");
+                Reject(delegate { PortablePackage.Resolve(packageLauncher); }, "modified bundled library accepted");
+                File.WriteAllBytes(Path.Combine(directory, "SDL2.dll"), Pe());
+                File.WriteAllText(packagePath, packageJson.Replace("SDL2.dll", "../SDL2.dll"));
+                Reject(delegate { PortablePackage.Resolve(packageLauncher); }, "package path traversal accepted");
+                File.WriteAllText(packagePath, packageJson.Replace("SDL2.dll", "dxil.dll"));
+                Reject(delegate { PortablePackage.Resolve(packageLauncher); }, "duplicate package member accepted");
+                File.WriteAllText(packagePath, packageJson.Replace("\"schema\":1", "\"schema\":2"));
+                Reject(delegate { PortablePackage.Resolve(packageLauncher); }, "unknown package schema accepted");
+                File.WriteAllText(packagePath, packageJson);
+                Check(PortablePackage.Resolve(packageLauncher) == game, "restored package did not recover");
+
                 Settings settings = new Settings { RuntimePath = "Synthetic build & Unicode \u00e9", RomPath = "Selected synthetic ROM" };
                 LocalSetup.SaveSettings(directory, settings);
                 Settings loaded = LocalSetup.LoadSettings(directory);
@@ -449,6 +496,32 @@ namespace JfgLauncher
                 Reject(delegate { FrontendBridge.ApplyReplayOptions(LocalSetup.StartInfo(game, wrongRom, directory), new[] {"--frontend-worker", "play", directory, "0", "--input-replay"}); }, "missing replay argument accepted");
                 Reject(delegate { FrontendBridge.ApplyReplayOptions(LocalSetup.StartInfo(game, wrongRom, directory), new[] {"--frontend-worker", "setup", directory, "0", "--input-replay", replayPath}); }, "setup received replay options");
 
+
+                Environment.SetEnvironmentVariable("JFG_GAMEPLAY_TRACE", "must-not-inherit");
+                var diagnosticStart = LocalSetup.StartInfo(game, wrongRom, directory);
+                Environment.SetEnvironmentVariable("JFG_GAMEPLAY_TRACE", null);
+                Check(!diagnosticStart.EnvironmentVariables.ContainsKey("JFG_GAMEPLAY_TRACE"), "ordinary play inherited gameplay logging");
+                string diagnosticArgs = diagnosticStart.Arguments;
+                string diagnosticRoot = Path.Combine(directory, "diagnostic captures");
+                FrontendBridge.ApplyReplayOptions(diagnosticStart, new[] {"--frontend-worker", "play", directory, "0", "--diagnostics", diagnosticRoot});
+                string diagnosticSession = Path.GetDirectoryName(diagnosticStart.EnvironmentVariables["JFG_GAMEPLAY_TRACE"]);
+                Check(Directory.Exists(diagnosticSession) && Path.GetDirectoryName(diagnosticSession) == diagnosticRoot, "capture folder missing");
+                Check(diagnosticStart.Arguments == diagnosticArgs && !diagnosticStart.EnvironmentVariables.ContainsKey("JFG_NAVIGATION_MOD") &&
+                    !diagnosticStart.EnvironmentVariables.ContainsKey("JFG_MOD_JUNO_DOUBLE_RUN") &&
+                    !diagnosticStart.EnvironmentVariables.ContainsKey("JFG_PHASE8_INPUT_REPLAY"), "logging changed gameplay");
+                Check(diagnosticStart.EnvironmentVariables["JFG_PHASE9_ACTOR_TRACE"] == "1" &&
+                    Path.GetDirectoryName(diagnosticStart.EnvironmentVariables["JFG_PHASE9_INPUT_RECORD"]) == diagnosticSession &&
+                    Path.GetDirectoryName(diagnosticStart.EnvironmentVariables["JFG_PHASE8_PROGRESS"]) == diagnosticSession &&
+                    Path.GetDirectoryName(diagnosticStart.EnvironmentVariables["JFG_PHASE95_NATIVE_POLL_TRACE"]) == diagnosticSession, "capture streams split");
+                File.WriteAllText(Path.Combine(diagnosticSession, "sentinel.txt"), "retained");
+                string diagnosticSecond = FrontendBridge.ConfigureDiagnostics(LocalSetup.StartInfo(game, wrongRom, directory), diagnosticRoot);
+                Check(diagnosticSecond != diagnosticSession && File.ReadAllText(Path.Combine(diagnosticSession, "sentinel.txt")) == "retained", "repeat capture overwrote evidence");
+                Reject(delegate { FrontendBridge.ConfigureDiagnostics(diagnosticStart, diagnosticRoot); }, "duplicate capture accepted");
+                Reject(delegate { FrontendBridge.ConfigureDiagnostics(replayStart, diagnosticRoot); }, "replay mixed with capture");
+                Reject(delegate { FrontendBridge.ApplyReplayOptions(diagnosticStart, new[] {"--frontend-worker", "play", directory, "0", "--input-replay", replayPath}); }, "capture mixed with replay");
+                Reject(delegate { FrontendBridge.ApplyReplayOptions(diagnosticStart, new[] {"--frontend-worker", "play", directory, "0", "--progress-output", progressPath}); }, "capture progress overwritten");
+                Reject(delegate { FrontendBridge.ApplyReplayOptions(LocalSetup.StartInfo(game, wrongRom, directory), new[] {"--frontend-worker", "setup", directory, "0", "--diagnostics", diagnosticRoot}); }, "setup captured gameplay");
+
                 Check(start.WorkingDirectory == directory && start.Arguments.EndsWith(" --play"), "incorrect game launch plan");
                 Check(start.Arguments.Contains(LocalSetup.Quote(flash)), "save path not isolated");
                 Check(!LocalSetup.FriendlyError(new IOException("PRIVATE-PATH-CANARY")).Contains("PRIVATE-PATH-CANARY"), "exception discloses path");
@@ -502,6 +575,20 @@ namespace JfgLauncher
                 Check(ControllerProfile.Load(portRoot,1).Device==-2 && ControllerProfile.Load(portRoot,0).Device==0,"disconnect changed the wrong player");
                 Check(ControllerProfile.Parse(new ControllerProfile{Device=-3}.Encode()).Device==-3,"keyboard profile rejected");
                 Reject(delegate { ControllerProfile.Parse(new ControllerProfile{Device=-4}.Encode()); },"invalid device sentinel accepted");
+                var sdlProfile=new ControllerProfile{Device=-4,DeviceKey="sdl:"+new string('a',64)};
+                sdlProfile.Bindings[2]=25;
+                Check(ControllerProfile.Parse(sdlProfile.Encode()).DeviceKey==sdlProfile.DeviceKey,"SDL identity round trip");
+                Check(ControllerProfile.Parse(sdlProfile.Encode()).Bindings[2]==25,"SDL bindings round trip");
+                Reject(delegate{ControllerProfile.Parse(sdlProfile.Encode().Replace("version=2","version=1"));},"SDL v2 accepted as v1");
+                Reject(delegate{ControllerProfile.Parse(sdlProfile.Encode().Replace("device=-4","device=-3"));},"SDL key on keyboard accepted");
+                Reject(delegate{ControllerProfile.Parse(sdlProfile.Encode()+"device_key="+sdlProfile.DeviceKey+"\n");},"duplicate SDL key accepted");
+                Reject(delegate{ControllerProfile.Parse(sdlProfile.Encode().Replace("sdl:","SDL:"));},"noncanonical SDL identity accepted");
+                sdlProfile.Save(portRoot,3);
+                Reject(delegate{sdlProfile.ValidateAssignment(portRoot,2);},"same SDL controller shared");
+                new ControllerProfile{Device=-4,DeviceKey="sdl:"+new string('b',64)}.ValidateAssignment(portRoot,2);
+                Check(true,"different SDL controllers conflict");
+                new ControllerProfile{Device=-2}.Save(portRoot,3);
+
 
                 string normalProfile = Path.Combine(directory, "profiles", "default");
                 Directory.CreateDirectory(normalProfile);
@@ -765,6 +852,7 @@ namespace JfgLauncher
                 checks += BoxJumpTests.Run();
                 checks += AutonomousExplorerTests.Run();
                 checks += UnifiedNavigationTests.Run(directory);
+                checks += UpdateCheckerTests.Run();
                 Console.WriteLine("Launcher checks passed: " + checks);
                 return 0;
             }

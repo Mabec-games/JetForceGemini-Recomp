@@ -82,12 +82,12 @@ internal static class FrontendBridge
                 {
                 }
                 throw new InvalidDataException(
-                    "The game build did not answer the launcher. Run setup to rebuild it.");
+                    "The bundled game did not answer the launcher. Extract a fresh copy of the release ZIP.");
             }
             if (!Task.WaitAll(new Task[] { stdout, stderr }, timeout) || check.ExitCode != 0 ||
                 stdout.Result.Trim() != "jfg-frontend-1")
                 throw new InvalidDataException(
-                    "This game build predates the unified frontend. Run setup to rebuild it.");
+                    "The bundled game is incompatible with this launcher. Extract the complete release ZIP.");
         }
     }
     internal static string MapDirectory(string profile) {
@@ -140,7 +140,7 @@ internal static class FrontendBridge
     {
         LocalSetup.ValidateRuntime(Read("frontend-runtime.txt"));
         if (!File.Exists(Read("frontend-rom.txt")))
-            throw new InvalidDataException("Choose your ROM and finish setup before saving a direct-launch shortcut.");
+            throw new InvalidDataException("Choose your ROM before saving a direct-launch shortcut.");
         using (var dialog = new SaveFileDialog())
         {
             dialog.Title = "Save direct-launch shortcut";
@@ -159,12 +159,39 @@ internal static class FrontendBridge
 
     // Explicit diagnostic arguments are forwarded after ordinary launch environment
     // sanitization. An inherited JFG_* variable must never activate a replay.
+    // Each explicit diagnostic launch owns a fresh directory. Ordinary Play
+    // continues to strip inherited JFG_* variables and never enables recording.
+    internal static string ConfigureDiagnostics(ProcessStartInfo start, string destination)
+    {
+        string[] variables = { "JFG_GAMEPLAY_TRACE", "JFG_PHASE8_PROGRESS",
+            "JFG_PHASE9_INPUT_RECORD", "JFG_PHASE9_ACTOR_TRACE",
+            "JFG_PHASE95_NATIVE_POLL_TRACE", "JFG_PHASE8_FRAME_CAPTURE",
+            "JFG_PHASE8_RDRAM_CAPTURE", "JFG_PHASE8_INPUT_REPLAY" };
+        foreach (string variable in variables)
+            if (start.EnvironmentVariables.ContainsKey(variable))
+                throw new InvalidDataException("Diagnostics cannot be combined with duplicate recording or replay options.");
+        string directory = Path.Combine(LocalSetup.FullPath(destination),
+            DateTime.UtcNow.ToString("yyyyMMdd-HHmmss") + "-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        start.EnvironmentVariables["JFG_GAMEPLAY_TRACE"] = Path.Combine(directory, "gameplay.tsv");
+        start.EnvironmentVariables["JFG_PHASE8_PROGRESS"] = Path.Combine(directory, "progress.json");
+        start.EnvironmentVariables["JFG_PHASE9_INPUT_RECORD"] = Path.Combine(directory, "input.txt");
+        start.EnvironmentVariables["JFG_PHASE9_ACTOR_TRACE"] = "1";
+        start.EnvironmentVariables["JFG_PHASE95_NATIVE_POLL_TRACE"] = Path.Combine(directory, "polls.tsv");
+        start.EnvironmentVariables["JFG_PHASE8_FRAME_CAPTURE"] = Path.Combine(directory, "last-frame.ppm");
+        start.EnvironmentVariables["JFG_PHASE8_RDRAM_CAPTURE"] = Path.Combine(directory, "final-rdram.bin");
+        return directory;
+    }
+
     internal static void ApplyReplayOptions(ProcessStartInfo start, string[] args)
     {
         for (int i = 4; i < args.Length; i += 2)
         {
             if (args[1] != "play" || i + 1 >= args.Length)
                 throw new InvalidDataException("Replay options require a play action and a file path.");
+            if (args[i] == "--diagnostics") { ConfigureDiagnostics(start, args[i + 1]); continue; }
+            if (args[i] == "--input-replay" && start.EnvironmentVariables.ContainsKey("JFG_PHASE9_INPUT_RECORD"))
+                throw new InvalidDataException("A live diagnostic capture cannot replay inputs.");
             string variable;
             if (args[i] == "--input-replay") variable = "JFG_PHASE8_INPUT_REPLAY";
             else if (args[i] == "--progress-output") variable = "JFG_PHASE8_PROGRESS";
@@ -182,6 +209,11 @@ internal static class FrontendBridge
 
     private static async Task<int> Execute(string action, IntPtr owner, string[] args)
     {
+        if (action == "updates") {
+            var result = await Task.Run(delegate { return UpdateChecker.Check(UpdateChecker.InstalledVersion, UpdateChecker.Fetch); });
+            Write("frontend-update.txt", result.Wire());
+            return 0;
+        }
         if (action == "shortcut") { SaveShortcutDialog(owner); return 0; }
         if ((action == "play" || action == "direct-play") && InventorySession.IsActive(root))
             throw new InvalidOperationException("The game is already running for this profile.");
@@ -226,22 +258,44 @@ internal static class FrontendBridge
             using(var tool=NativeLiveTools.OpenWindow(action,root,owner))await Task.Run(delegate{tool.WaitForExit();});
             return 0;
         }
+        if (action == "import-rom")
+        {
+            State("Importing your ROM. This only needs to be done once...");
+            string imported = await Task.Run(delegate { return ImportedRom.Import(root, Read("frontend-rom-source.txt")); });
+            Write("frontend-rom.txt", imported);
+            var saved = LocalSetup.LoadSettings(root);
+            saved.RomPath = imported;
+            LocalSetup.SaveSettings(root, saved);
+            await Task.Run((Action)PrepareBackground);
+            File.Delete(Path.Combine(root, "frontend-rom-source.txt"));
+            State("ROM imported. Click Play. The original file is no longer needed.");
+            return 0;
+        }
         if (action == "init")
         {
             var settings = LocalSetup.LoadSettings(root);
             if (!File.Exists(Path.Combine(root, "frontend-rom.txt")))
                 Write("frontend-rom.txt", settings.RomPath ?? "");
-            if (!File.Exists(Path.Combine(root, "frontend-runtime.txt")))
-                Write(
-                    "frontend-runtime.txt",
-                    LocalSetup.PreferredRuntime(AppDomain.CurrentDomain.BaseDirectory, settings.RuntimePath));
+            string stored = ImportedRom.FileName(root);
+            string selected = Read("frontend-rom.txt");
+            if (File.Exists(stored) || File.Exists(selected)) {
+                State("Checking your local ROM...");
+                string imported = await Task.Run(delegate { return ImportedRom.Import(root, File.Exists(stored) ? stored : selected); });
+                Write("frontend-rom.txt", imported);
+                settings.RomPath = imported;
+                LocalSetup.SaveSettings(root, settings);
+            }
+            else if (!File.Exists(selected)) Write("frontend-rom.txt", "");
+            // Always resolve against this package, including after moving or updating it.
+            Write("frontend-runtime.txt", PortablePackage.FromLauncher());
             if (!File.Exists(ControllerProfile.FileName(root)))
                 new ControllerProfile().Save(root);
             await Task.Run((Action)PrepareBackground);
-            State("Ready. Select your ROM and play, or run setup to build the game.");
+            State(File.Exists(Read("frontend-rom.txt")) ? "Ready. Your ROM is imported. Click Play." : "Import your ROM once, then click Play. No build tools are required.");
             return 0;
         }
-        string rom = LocalSetup.FullPath(Read("frontend-rom.txt"));
+        string rom = await Task.Run(delegate { return ImportedRom.Import(root, Read("frontend-rom.txt")); });
+        Write("frontend-rom.txt", rom);
         State("Verifying your ROM...");
         using (var verified = await Task.Run(delegate { return LocalSetup.OpenVerifiedRom(rom); }))
         {
@@ -249,44 +303,16 @@ internal static class FrontendBridge
             {
                 if (action == "setup")
                 {
-                    string built = null;
-                    using (var process = new Process())
-                    {
-                        process.StartInfo = FirstRun.StartInfo(
-                            rom, Path.Combine(FirstRun.Root, "setup", BuildInfo.SourceCommit));
-                        process.OutputDataReceived += delegate(object sender, DataReceivedEventArgs e)
-                        {
-                            if (e.Data == null)
-                                return;
-                            support.Session.SetupLine(e.Data);
-                            if (e.Data.StartsWith("Built: ", StringComparison.Ordinal))
-                                built = e.Data.Substring(7);
-                            State(e.Data);
-                        };
-                        process.ErrorDataReceived += delegate(object sender, DataReceivedEventArgs e)
-                        {
-                            support.Session.SetupLine(e.Data);
-                        };
-                        process.Start();
-                        process.BeginOutputReadLine();
-                        process.BeginErrorReadLine();
-                        await Task.Run(delegate { process.WaitForExit(); });
-                        support.Session.Exit(process.ExitCode);
-                        if (process.ExitCode == 3010)
-                        {
-                            State("Restart Windows, then run setup again. Progress is preserved.");
-                            return 3010;
-                        }
-                        if (process.ExitCode != 0 || built == null)
-                            throw new IOException("Setup stopped. Open the support report for details.");
-                    }
-                    string runtime = LocalSetup.ValidateRuntime(built);
-                    Write("frontend-runtime.txt", runtime);
-                    LocalSetup.SaveSettings(root, new Settings { RomPath = rom, RuntimePath = runtime });
-                    State("Build ready. Click Play.");
+                    State("Checking game files...");
+                    string bundled = await Task.Run((Func<string>)PortablePackage.FromLauncher);
+                    await Task.Run(delegate { CheckRuntimeProtocol(bundled, 10000); });
+                    Write("frontend-runtime.txt", bundled);
+                    LocalSetup.SaveSettings(root, new Settings { RomPath = rom, RuntimePath = bundled });
+                    State("ROM and game files verified. Click Play.");
                     return 0;
                 }
-                string game = LocalSetup.ValidateRuntime(Read("frontend-runtime.txt"));
+                string game = await Task.Run((Func<string>)PortablePackage.FromLauncher);
+                Write("frontend-runtime.txt", game);
                 CheckRuntimeProtocol(game, 10000);
                 LocalSetup.SaveSettings(root, new Settings { RomPath = rom, RuntimePath = game });
                 using (var process = new Process())
@@ -303,6 +329,31 @@ internal static class FrontendBridge
                         process.StartInfo.EnvironmentVariables["JFG_FRONTEND_PARENT"] =
                             owner.ToInt64().ToString(System.Globalization.CultureInfo.InvariantCulture);
                     process.StartInfo.EnvironmentVariables["JFG_SUPPORT_LOG"] = support.Session.NativePath;
+                    string gameplayTrace = process.StartInfo.EnvironmentVariables["JFG_GAMEPLAY_TRACE"];
+                    if (!String.IsNullOrEmpty(gameplayTrace))
+                    {
+                        string capture = Path.GetDirectoryName(gameplayTrace);
+                        var metadata = new StringBuilder();
+                        metadata.AppendLine("started_utc=" + DateTime.UtcNow.ToString("o"));
+                        metadata.AppendLine("runtime=" + game);
+                        metadata.AppendLine("runtime_sha256=" + SupportSession.Hash(game));
+                        metadata.AppendLine("profile=" + root);
+                        metadata.AppendLine("support=" + support.Session.DirectoryPath);
+                        metadata.AppendLine("live_tools=" + process.StartInfo.EnvironmentVariables[mods ? "JFG_MOD_OUTPUT" : "JFG_LIVE_OUTPUT"]);
+                        metadata.AppendLine("logs=gameplay,timing,actor,input,polls,support,final-frame,final-rdram");
+                        metadata.AppendLine("note=Detailed logging can affect timings; compare against a normal session.");
+                        File.WriteAllText(Path.Combine(capture, "session.txt"), metadata.ToString());
+                        string initial = Path.Combine(capture, "initial-profile");
+                        Directory.CreateDirectory(initial);
+                        foreach (string source in Directory.GetFiles(root))
+                        {
+                            string name = Path.GetFileName(source);
+                            if (name.EndsWith(".ini", StringComparison.OrdinalIgnoreCase) ||
+                                name == "jfg.flash" || name == "controller-1.pak" || name == "launcher.json")
+                                File.Copy(source, Path.Combine(initial, name));
+                        }
+                        Write("frontend-diagnostics-session.txt", capture);
+                    }
                     try
                     {
                         support.Session.RuntimeDetails(game, root);
@@ -339,7 +390,7 @@ internal static class FrontendBridge
                     await Task.WhenAll(stdout, stderr);
                     support.Session.Exit(process.ExitCode);
                     State(process.ExitCode == 0 ? "Game stopped. Your saves are ready for next time."
-                                                : "Game exited unexpectedly. Open Tools > Support report.");
+                                                : "Game exited unexpectedly. Open Help > Support report.");
                     return process.ExitCode;
                 }
             }
@@ -372,10 +423,10 @@ internal static class FrontendBridge
             if (!Int64.TryParse(args[3], out handle))
                 throw new InvalidDataException("Invalid frontend owner.");
             if (Array.IndexOf(
-                    new[] { "init", "assets", "setup", "play", "direct-play", "shortcut", "controllers", "audio", "support", "map", "inventory", "map-data", "inventory-data", "sessions", "export" },
+                    new[] { "updates", "init", "import-rom", "assets", "setup", "play", "direct-play", "shortcut", "controllers", "audio", "support", "map", "inventory", "map-data", "inventory-data", "sessions", "export" },
                     args[1]) < 0)
                 throw new InvalidDataException("Unknown frontend action.");
-            if (args[1] == "play" || args[1] == "direct-play") {
+            if (args[1] == "play" || args[1] == "direct-play" || args[1] == "import-rom" || args[1] == "init") {
                 string key;
                 using (var hash = System.Security.Cryptography.SHA256.Create())
                     key = BitConverter.ToString(hash.ComputeHash(Encoding.UTF8.GetBytes(root.ToUpperInvariant()))).Replace("-", "");

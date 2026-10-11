@@ -12,7 +12,7 @@ endif()
 
 project(
     jfg_recomp
-    VERSION 1.0.0
+    VERSION 1.1.0
     DESCRIPTION "ROM-free host scaffolding for a Jet Force Gemini native recompilation"
     LANGUAGES C CXX
 )
@@ -101,7 +101,7 @@ if(WIN32)
         "1 ICON \"${CMAKE_CURRENT_SOURCE_DIR}/launcher/ui/assets/app.ico\"\n")
     add_executable(jfg-frontend WIN32 src/app/frontend_win32.cpp "${jfg_application_icon}")
     target_compile_features(jfg-frontend PRIVATE cxx_std_20)
-    target_link_libraries(jfg-frontend PRIVATE user32 gdi32 shell32 ole32 comdlg32)
+    target_link_libraries(jfg-frontend PRIVATE user32 gdi32 shell32 ole32 comdlg32 dxgi)
     target_compile_definitions(jfg-frontend PRIVATE UNICODE _UNICODE)
     jfg_set_project_warnings(jfg-frontend)
     add_executable(jfg-support-capture src/app/support_capture.cpp)

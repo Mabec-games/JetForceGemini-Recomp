@@ -15,6 +15,11 @@ try {
     catch { $rejected = $_.Exception.Message -like '*failed (7)*' }
     Assert-Setup $rejected 'Native stderr must preserve the actual command failure.'
     Assert-Setup ($script:nativeProbe -contains 'JFG-SUPPORT setup_exit=0x00000007') 'Native exit code was not included in diagnostics.'
+    $negativeProbe = Invoke-SetupProbe "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" @('-NoProfile', '-File', $probe)
+    Assert-Setup ($negativeProbe.ExitCode -eq 7) 'Missing prerequisite stderr must return its failure status without aborting setup.'
+    Assert-Setup (@($negativeProbe.Lines).Count -eq 0) 'Native stderr must not be mistaken for an installed prerequisite.'
+    Assert-Setup ($ErrorActionPreference -eq 'Stop') 'A prerequisite probe must restore the installer error preference.'
+
 } finally { Remove-Item -LiteralPath $probe }
 function Find-Git { if ($script:hasGit) { 'synthetic-git' } }
 function Find-Python { if ($script:hasPython) { 'synthetic-python' } }

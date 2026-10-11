@@ -56,18 +56,32 @@ function Find-VisualStudio {
     return $null
 }
 
+function Invoke-SetupProbe([string]$File, [string[]]$Arguments) {
+    # Missing prerequisites may write native stderr. They are a negative probe,
+    # not a fatal PowerShell error under the installer's Stop preference.
+    $previousPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $lines = @(& $File @Arguments 2>$null)
+        $probeExit = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $previousPreference }
+    return [pscustomobject]@{ ExitCode = $probeExit; Lines = $lines }
+}
+
 function Test-Ubuntu {
     $wsl = Join-Path $env:WINDIR 'System32\wsl.exe'
     if (-not (Test-Path -LiteralPath $wsl)) { return $false }
-    $installed = (@(& $wsl --list --quiet 2>$null) -join "`n").Replace([string][char]0, '')
-    return ($LASTEXITCODE -eq 0 -and @($installed -split "`r?`n" | Where-Object { $_.Trim() -eq $script:Distro }).Count -gt 0)
+    $probe = Invoke-SetupProbe $wsl @('--list', '--quiet')
+    $installed = ($probe.Lines -join "`n").Replace([string][char]0, '')
+    return ($probe.ExitCode -eq 0 -and @($installed -split "`r?`n" | Where-Object { $_.Trim() -eq $script:Distro }).Count -gt 0)
 }
 
 function Test-LinuxPackages {
     if (-not (Test-Ubuntu)) { return $false }
-    $lines = @(& "$env:WINDIR\System32\wsl.exe" -d $script:Distro -u root --exec `
-        dpkg-query -W '-f=${db:Status-Abbrev}\n' @script:LinuxPackages 2>$null)
-    return ($LASTEXITCODE -eq 0 -and $lines.Count -eq $script:LinuxPackages.Count -and
+    $probe = Invoke-SetupProbe "$env:WINDIR\System32\wsl.exe" (@('-d', $script:Distro, '-u', 'root', '--exec',
+        'dpkg-query', '-W', '-f=${db:Status-Abbrev}\n') + $script:LinuxPackages)
+    $lines = @($probe.Lines)
+    return ($probe.ExitCode -eq 0 -and $lines.Count -eq $script:LinuxPackages.Count -and
         @($lines | Where-Object { $_ -notmatch '^ii' }).Count -eq 0)
 }
 

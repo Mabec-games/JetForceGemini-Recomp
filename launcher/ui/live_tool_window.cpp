@@ -143,9 +143,17 @@ int FrontendLiveToolEntry(HINSTANCE instance, int show) {
   cls.hbrBackground = CreateSolidBrush(RGB(11, 15, 23));
   RegisterClassW(&cls);
   int density = static_cast<int>(GetDpiForSystem());
-  RECT size{0, 0, MulDiv(live.kind == "map" ? 1200 : live.kind == "controllers" ? 960 : 486, density, 96),
-            MulDiv(live.kind == "map" ? 740 : live.kind == "controllers" ? 760 : 716, density, 96)};
+  RECT size{0, 0, MulDiv(live.kind == "map" ? 1200 : live.kind == "controllers" ? 1280 : 486, density, 96),
+            MulDiv(live.kind == "map" ? 740 : live.kind == "controllers" ? 920 : 716, density, 96)};
   AdjustWindowRectExForDpi(&size, WS_OVERLAPPEDWINDOW, FALSE, 0, density);
+  if(live.kind=="controllers") {
+    MONITORINFO monitor{sizeof(MONITORINFO)};
+    if(GetMonitorInfoW(MonitorFromWindow(live.owner,MONITOR_DEFAULTTONEAREST),&monitor)) {
+      const auto& work=monitor.rcWork;
+      size.right=size.left+std::min<LONG>(size.right-size.left,work.right-work.left-32);
+      size.bottom=size.top+std::min<LONG>(size.bottom-size.top,work.bottom-work.top-48);
+    }
+  }
   live.window = CreateWindowExW(
       0, cls.lpszClassName,
       live.kind == "map" ? L"JFG Live Map" : live.kind == "controllers" ? L"JFG Controller Mapping" : L"JFG Live Inventory",

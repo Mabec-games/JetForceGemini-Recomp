@@ -1,4 +1,4 @@
-name: Publish launcher release
+name: Publish playable Windows release
 
 on:
   push:
@@ -40,7 +40,7 @@ jobs:
     uses: ./.github/workflows/ci.yml
 
   publish:
-    name: Build and publish Windows launcher
+    name: Verify and publish prebuilt Windows game
     needs: [prepare, validate]
     runs-on: windows-2022
     timeout-minutes: 30
@@ -56,14 +56,13 @@ jobs:
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: '3.11'
-      - name: Build and test the release launcher
-        shell: powershell
-        run: ./scripts/build_launcher.ps1 -Test
-      - name: Package the launcher with licenses
-        run: python scripts/package_launcher.py
-      - name: Publish the verified assets as a GitHub Release
+      - name: Download the maintainer-built draft bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "${{ github.ref_name }}" --repo "${{ github.repository }}" --dir build/release
+      - name: Verify and publish the playable Windows bundle
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
           RELEASE_REF_TYPE: ${{ github.ref_type }}
-        run: python scripts/release_launcher.py publish
+        run: python scripts/release_prebuilt.py publish --output build/release

@@ -1,0 +1,17 @@
+Exact upstream notices from the locally pinned RT64 tree.
+
+SDL2: rt64/src/contrib/mupen64plus-win32-deps/SDL2-2.26.3/COPYING.txt; SHA-256 7a771248ca372e2dff4887c921543699847ae44c56d7558692f5860237f1f914
+ddspp: rt64/src/contrib/ddspp/LICENSE; SHA-256 bec2b85d3040e8f9de15f52e26b29311959d978bfb03ff941b699d7642a17868
+hlslpp: rt64/src/contrib/hlslpp/LICENSE; SHA-256 296a74cb0ec3974aa74fc77f547663e0a0c1a8e803d177ece3ce82a94188aa23
+imgui: rt64/src/contrib/imgui/LICENSE.txt; SHA-256 44abf9b2498d127928abb6e23b4cda06f6ec3577b34b0c9d4d0672f38b3d6293
+implot: rt64/src/contrib/implot/LICENSE; SHA-256 38bd30c2111fe7e3d8fb86d8607491239659eff1df1b1004b9a8349e20a91967
+im3d: rt64/src/contrib/im3d/LICENSE; SHA-256 1f19ce7ee7da440b1ba52c753f299d76ff87052b219ef535c8aa40fbe9f04900
+stb: rt64/src/contrib/stb/LICENSE; SHA-256 bebfe904b14301657e4e5d655c811d51fd31b97c455b9cc2d8600d6bac6cff63
+xxHash: rt64/src/contrib/xxHash/LICENSE; SHA-256 6ffedbc0f7878612d2b23589f1ff2ab15633e1df7963a5d9fc750ec5500c7e7a
+zstd: rt64/src/contrib/zstd/LICENSE; SHA-256 7055266497633c9025b777c78eb7235af13922117480ed5c674677adc381c9d8
+re-spirv: rt64/src/contrib/re-spirv/LICENSE; SHA-256 761ecab744d5ed0528b5b794239abaa6f62bd5bd36fc1980b3cb98c48ce32868
+SPIRV-Headers: rt64/src/contrib/re-spirv/external/SPIRV-Headers/LICENSE; SHA-256 ff04ae7e6a468587fe59434fee2e67c0e2a749b592c794b764ff80f30b94a084
+SPIRV-Cross: rt64/src/contrib/spirv-cross/LICENSE; SHA-256 cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30
+VulkanMemoryAllocator: rt64/src/contrib/plume/contrib/VulkanMemoryAllocator/LICENSE.txt; SHA-256 8d70e4cf2a9941f6454da71cd60e38484dd3e34810c824760d550e982af6d97a
+D3D12MemoryAllocator: rt64/src/contrib/plume/contrib/D3D12MemoryAllocator/LICENSE.txt; SHA-256 9dab190f56ec64bd4dbad25c349b4a381436d54fc908c312ffa3bbf7d1608fa0
+volk: rt64/src/contrib/plume/contrib/volk/LICENSE.md; SHA-256 33c831f76b79501665e66c23ac8f876020457c216d44526a8f747da897999b35

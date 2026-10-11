@@ -6,6 +6,7 @@
 
 #include "hle/rt64_application.h"
 #include "hle/rt64_vi.h"
+#include "hle/rt64_workload_queue.h"
 #include "rhi/rt64_render_hooks.h"
 
 #include "xxHash/xxhash.h"
@@ -1050,6 +1051,34 @@ Rt64GraphicsDiagnostics Rt64Shell::last_graphics_diagnostics()
     diagnostics.last_display_list_address = stats.last_display_list_address;
     diagnostics.last_display_list_target = stats.last_display_list_target;
     return diagnostics;
+}
+
+Rt64TimingSnapshot Rt64Shell::try_timing_snapshot() const noexcept {
+    if (!impl_ || !impl_->application || !impl_->application->workloadQueue)
+        return {};
+    try {
+        auto& queue = *impl_->application->workloadQueue;
+        // At this pin the render loop holds threadMutex while writing both
+        // profilers and workloadId. Do not read their vectors without that lock.
+        std::unique_lock lock(queue.threadMutex, std::try_to_lock);
+        if (!lock.owns_lock() || queue.workloadId == 0 ||
+            queue.rendererGPUProfiler.history.empty() ||
+            queue.rendererCPUProfiler.history.empty())
+            return {};
+        const auto& gpu = queue.rendererGPUProfiler;
+        Rt64TimingSnapshot result;
+        result.available = true;
+        result.workload_id = queue.workloadId;
+        result.history_index = gpu.index();
+        result.history_size = static_cast<std::uint32_t>(gpu.size());
+        result.gpu_last_ms = gpu.history[(gpu.index()+gpu.size()-1U)%gpu.size()];
+        result.gpu_average_ms = gpu.average();
+        result.gpu_max_ms = *std::max_element(gpu.history.begin(), gpu.history.end());
+        result.renderer_wall_average_ms = queue.rendererCPUProfiler.average();
+        return result;
+    } catch (...) {
+        return {};
+    }
 }
 
 Rt64FramebufferInfo Rt64Shell::last_framebuffer() const noexcept {

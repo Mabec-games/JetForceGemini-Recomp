@@ -1,0 +1,56 @@
+HISTORICAL BETA NOTES
+
+Superseded by v1.1.0. See CHANGELOG.md, docs/getting-started.md, and
+docs/development/releases.md for the current import and release flow.
+
+JFG PREBUILT INSTALLER BETA
+
+The owner requested the Zelda64Recomp-style flow on 2026-10-09: ship a compiled
+program, require the player's own ROM, and load assets from that ROM locally.
+This branch implements that distribution model for local owner review. It does
+not publish a release or supply a ROM, extracted assets, saves, or debug symbols.
+
+Player flow: extract the complete beta ZIP, open JFG-Launcher.exe, choose the
+supported US .z64 ROM, and click Play. No Git, Python, VS, WSL or compilation.
+The Game menu can verify the package. Missing or modified files stop startup;
+there is no automatic fallback into installing developer tools.
+
+The embedded helper resolves files beside the actual launcher, not beside its
+extraction cache. The file manifest verifies the native executable, the three game
+runtime DLLs, and the required Microsoft Visual C++ runtime libraries. ROM validation still checks size, format and full SHA-1 locally.
+No online account or ROM upload is used. Moving the folder refreshes the runtime
+path on the next launch. Existing profiles and saves remain in place.
+
+Build the frontend with scripts/build_launcher.ps1 -Test. Prepare a reviewed
+clean game runtime using the maintainer build, then run scripts/package_beta.py
+with explicit --launcher, --runtime, --vc-runtime (the maintainer Visual Studio
+x64 Microsoft.VC143.CRT redistributable directory), and a new --output directory. The beta packager
+uses a fixed file allowlist and verifies runtime build identity. Legacy public
+launcher packaging is separate. Generated game binaries stay out of Git.
+
+The runtime in the first beta is the verified v1.0.0 build from d3b9d62. This
+change modifies installation and packaging, not game behavior. Full gameplay in
+the VM remains the owner's manual test; Hyper-V graphics support is separate.
+
+This owner-reviewed change to the project's distribution boundary is not a
+copyright clearance opinion. Existing third-party license obligations remain.
+
+Beta 1 failed to start on clean Windows with 0xC0000135: Microsoft C++
+runtime DLLs were absent. Beta 2 packages the unmodified x64 VC143 runtime
+libraries app-locally, without installing development tools or changing Windows.
+
+Beta 3 checks for hardware graphics before Play, including direct shortcuts.
+The clean Hyper-V VM exposes Microsoft Basic Render Driver (1414:008c) twice,
+including an entry without DXGI's software flag. Beta 2 therefore entered WARP
+pipeline compilation, stopped at the first frame, and exceeded 10 GB resident
+RAM. The exact game binary reached 180 retraces with 69 graphics tasks and
+rendered an image on the host RTX 5090. This is startup coverage, not a campaign
+playthrough. Beta 3 identifies that software adapter by its stable device ID as
+well as DXGI flags and explains the hardware requirement before starting a game.
+Zero dedicated VRAM does not reject integrated GPUs. A hardware presence check
+does not prove every driver or game feature is compatible.
+
+The clean VM remains useful for extraction, ROM selection and file verification.
+Gameplay requires a compatible GPU accessible to the guest, or testing on the
+host. Microsoft does not support Hyper-V GPU-P/DDA on Windows 11 Pro desktop
+hosts: https://learn.microsoft.com/en-us/troubleshoot/windows-server/virtualization/troubleshoot-hyper-v-gpu-assignment-partitioning-passthrough-issues

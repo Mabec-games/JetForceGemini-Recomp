@@ -49,6 +49,8 @@ typedef struct JfgOriginalTimingFast {
  uint32_t execution_fast_pending,guest_last_pc,guest_last_word;
  bool execution_fast_profile_ready,guest_previous_branch,guest_previous_delay;
  bool guest_eret_boundary,play_mode;
+ bool diagnostic_host_clock;
+ unsigned host_clock_poll_budget;
  const volatile uint64_t* io_revision;
  volatile uint64_t* io_guest_count;
  JfgTimingCacheLine *instruction_cache,*data_cache;
@@ -100,7 +102,8 @@ static JFG_CLOCK_INLINE void jfg_original_timing_step(unsigned metadata,unsigned
  unsigned kind=(metadata>>12U)&3U;
  // CACHE instructions and every event/observer boundary retain the fully
 // checked native handler. Constant instruction operands fold at generation sites.
- if(s && context && kind!=3U && s->execution_fast_profile_ready &&
+ if(s && context && kind!=3U && (s->execution_fast_profile_ready ||
+    (s->diagnostic_host_clock && s->host_clock_poll_budget>1U)) &&
     !s->guest_eret_boundary && (metadata&0x800U)==0U &&
     (s->play_mode || s->observed_guest_instructions<24000000000ULL) &&
     s->execution_fast_deadline>s->cpu_count && s->execution_fast_revision==*s->io_revision) {
@@ -109,16 +112,23 @@ static JFG_CLOCK_INLINE void jfg_original_timing_step(unsigned metadata,unsigned
   bool eligible=(cpu->status_reg&7U)==1U && (s->execution_fast_pending&cpu->status_reg&0xff00U)!=0U;
   if(!eligible && !(fpu && (cpu->status_reg&0x20000000U)==0U) && (metadata&0x200U)==0U) {
    bool delay=s->guest_previous_branch && pc==s->guest_last_pc+4U;
-   uint64_t cost=jfg_clock_fetch(s,pc)+((metadata>>16U)&127U);
-   if(kind==1U || kind==2U) {
-    unsigned reg=(word>>21U)&31U;uint64_t value=0;
-    if(reg)memcpy(&value,(const unsigned char*)cpu+offsetof(recomp_context,r1)+(reg-1)*sizeof(uint64_t),sizeof(value));
-    cost+=jfg_clock_data(s,(uint32_t)value+(uint32_t)(int32_t)(int16_t)word,kind==2U);
+   if(s->diagnostic_host_clock) {
+    // Ordinary native instructions carry no emulated execution penalty.
+    // A bounded budget returns to the host clock/device handler; hardware,
+    // observer, exception and interrupt checks above are never bypassed.
+    --s->host_clock_poll_budget;
+   } else {
+    uint64_t cost=jfg_clock_fetch(s,pc)+((metadata>>16U)&127U);
+    if(kind==1U || kind==2U) {
+     unsigned reg=(word>>21U)&31U;uint64_t value=0;
+     if(reg)memcpy(&value,(const unsigned char*)cpu+offsetof(recomp_context,r1)+(reg-1)*sizeof(uint64_t),sizeof(value));
+     cost+=jfg_clock_data(s,(uint32_t)value+(uint32_t)(int32_t)(int16_t)word,kind==2U);
+    }
+    s->cache_counters[10]+=cost;
+    cost+=s->diagnostic_cpu_half_tick;
+    s->cpu_count+=cost/2U;s->diagnostic_cpu_half_tick=cost%2U;
    }
-   s->cache_counters[10]+=cost;
-   cost+=s->diagnostic_cpu_half_tick;
    ++s->observed_guest_instructions;++s->execution_fast_hits;
-   s->cpu_count+=cost/2U;s->diagnostic_cpu_half_tick=cost%2U;
    *s->io_guest_count=s->cpu_count;
    s->guest_last_pc=pc;s->guest_last_word=word;
    s->guest_previous_delay=delay;s->guest_previous_branch=(metadata&0x400U)!=0U;

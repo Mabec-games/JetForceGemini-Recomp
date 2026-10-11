@@ -125,6 +125,20 @@ struct Rt64FrameView {
     }
 };
 
+// Diagnostic snapshot of RT64's already completed timestamp queries. The
+// rolling history describes workloads, not necessarily the current submission.
+// Renderer wall time includes waits and is not a CPU utilization measurement.
+struct Rt64TimingSnapshot {
+    bool available = false;
+    std::uint64_t workload_id = 0;
+    std::uint32_t history_index = 0;
+    std::uint32_t history_size = 0;
+    double gpu_last_ms = 0;
+    double gpu_average_ms = 0;
+    double gpu_max_ms = 0;
+    double renderer_wall_average_ms = 0;
+};
+
 struct Rt64GraphicsDiagnostics {
     std::size_t matrix_commands = 0U;
     std::size_t vertex_batches = 0U;
@@ -209,6 +223,9 @@ public:
     [[nodiscard]] std::size_t last_command_count() const noexcept;
     [[nodiscard]] Rt64GraphicsDiagnostics last_graphics_diagnostics()
         const noexcept;
+    // Try-locks the renderer's owner mutex; never waits for rendering or queries.
+    // A busy renderer reports unavailable rather than blocking or racing.
+    [[nodiscard]] Rt64TimingSnapshot try_timing_snapshot() const noexcept;
     [[nodiscard]] Rt64FramebufferInfo last_framebuffer() const noexcept;
     [[nodiscard]] Rt64FrameView last_presented_frame() const noexcept;
 

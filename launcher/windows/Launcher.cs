@@ -13,9 +13,9 @@ using System.Threading.Tasks;
 using System.Windows.Forms;
 
 [assembly: AssemblyTitle("JFG Launcher")]
-[assembly: AssemblyDescription("Local ROM build and launcher for JFG")]
-[assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyInformationalVersion("1.0.0")]
+[assembly: AssemblyDescription("Jet Force Gemini Recomp; import your own ROM once")]
+[assembly: AssemblyVersion("1.1.0.0")]
+[assembly: AssemblyInformationalVersion("1.1.0")]
 
 namespace JfgLauncher
 {
@@ -288,7 +288,7 @@ namespace JfgLauncher
             if (error is InvalidDataException) return error.Message;
             if (error is UnauthorizedAccessException) return "Access was denied. Choose readable local files and a writable user profile.";
             if (error is IOException) return "A local file could not be read or saved. Check permissions and close programs using it.";
-            if (error is System.ComponentModel.Win32Exception) return "Windows could not start the selected program. Check Python for building, or the native build and its libraries for playing.";
+            if (error is System.ComponentModel.Win32Exception) return "Windows could not start the game. Extract the complete beta ZIP and check its game files.";
             return "The launcher could not complete this operation. Check the selected files and the setup guide.";
         }
     }

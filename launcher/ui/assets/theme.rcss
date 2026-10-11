@@ -283,3 +283,10 @@ selectarrow { width:6dp; height:6dp; margin-right:7dp; margin-top:5dp; border-ri
 .device-name { font-size:18dp; }
 .input-device-card .label { font-size:11dp; }
 @media (max-width:700dp) { .controller-window .tabs button { min-width:40%; } }
+
+/* One-time import leaves the home screen focused on Play. */
+.rom-imported #rom-card { display: none; }
+
+/* A persistent home-screen notice; never interrupts gameplay. */
+#update-notice { display:none; margin-top:20dp; color:#ffb23e; border-color:#6b502e; font-size:15dp; padding:10dp 16dp; }
+.updates .panel-actions { display:flex; gap:12dp; margin-top:24dp; }

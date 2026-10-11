@@ -65,10 +65,18 @@ namespace JfgLauncher {
             var map=parent as NavigationMapWindow;if(map!=null&&map.SettingsSections!=null)foreach(var section in map.SettingsSections){var setting=FindItem(section.DropDownItems,label);if(setting!=null)return setting;}
             foreach(Control child in parent.Controls){var menu=child as MenuStrip;if(menu!=null){var item=FindItem(menu.Items,label);if(item!=null)return item;}var found=FindCommand(child,label);if(found!=null)return found;}return null;
         }
+        private static void WriteSnapshotFile<T>(string path,T value) {
+            // Match native publication: a reader may still hold the old snapshot.
+            string temporary=path+"."+Guid.NewGuid().ToString("N")+".tmp";
+            try {
+                using(FileStream file=File.Create(temporary))new DataContractJsonSerializer(typeof(T)).WriteObject(file,value);
+                if(File.Exists(path))File.Replace(temporary,path,null);else File.Move(temporary,path);
+            } finally {if(File.Exists(temporary))File.Delete(temporary);}
+        }
         private static void WriteSnapshot(string directory,MapSnapshot map) {
             map.Live.timestamp_ms=NavigationExplorer.Clock;++map.Live.update;
-            using(FileStream file=File.Create(Path.Combine(directory,"mesh.json")))new DataContractJsonSerializer(typeof(MapGeometry)).WriteObject(file,map.Mesh);
-            using(FileStream file=File.Create(Path.Combine(directory,"live.json")))new DataContractJsonSerializer(typeof(MapLive)).WriteObject(file,map.Live);
+            WriteSnapshotFile(Path.Combine(directory,"mesh.json"),map.Mesh);
+            WriteSnapshotFile(Path.Combine(directory,"live.json"),map.Live);
         }
         private static string[] Command(string directory) {
             using(var file=new FileStream(Path.Combine(directory,"ai-command.txt"),FileMode.Open,FileAccess.Read,FileShare.ReadWrite|FileShare.Delete))
@@ -90,6 +98,17 @@ namespace JfgLauncher {
         }
         internal static int Run(string directory) {
             checks=0;
+            string atomic=Path.Combine(directory,"snapshot-publication");Directory.CreateDirectory(atomic);
+            MapSnapshot publication=Room(89,1,Exit(89,500,0));WriteSnapshot(atomic,publication);
+            using(var held=new FileStream(Path.Combine(atomic,"live.json"),FileMode.Open,FileAccess.Read,FileShare.ReadWrite|FileShare.Delete)) {
+                publication.Live.player.position[0]=123;WriteSnapshot(atomic,publication);
+                var previous=(MapLive)new DataContractJsonSerializer(typeof(MapLive)).ReadObject(held);
+                Check(previous.player.position[0]==0,"existing reader lost its complete prior snapshot");
+                using(var current=File.OpenRead(Path.Combine(atomic,"live.json"))) {
+                    var latest=(MapLive)new DataContractJsonSerializer(typeof(MapLive)).ReadObject(current);
+                    Check(latest.player.position[0]==123 && latest.update>previous.update,"new reader did not see the complete published snapshot");
+                }
+            }
             MapMarker entrance=Exit(1,0,0),forward=Exit(2,500,0);
             Simulation s=new Simulation(Room(1,1,entrance,forward));
             Check(s.Tick(0).Route!=null && s.Explorer.TargetKey==NavigationExplorer.ExitKey(forward),"picked arrival doorway before new exit");

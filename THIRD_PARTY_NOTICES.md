@@ -47,6 +47,7 @@ to the upstream algorithm; the project license does not override upstream rights
 | OpenSSH `ssh-keygen` | BSD-style/component-specific notices; OS-provided signature tool only |
 | N64ModernRuntime | GPL-3.0-only; evaluated runtime reference, not the project's native bridge |
 | RT64 | MIT; renderer |
+| SDL 2.26.3 | Zlib; controller API and existing runtime DLL; [retained notice](launcher/ui/licenses/SDL2-zlib.txt) |
 | Plume | MIT; embedded compatibility patch context carries `patches/plume/LICENSE.upstream` |
 | CIC-NUS-6105 algorithm | X-Scale (2011), permissive two-condition notice retained in source and `patches/cic/LICENSE.upstream` |
 | Jet Force Gemini decompilation | No root license found; consulted facts-only for libultra identification (see attribution below) |
@@ -97,3 +98,11 @@ formula in `include/jfg/boot/original_timing_pi_dma.hpp`, are adapted from ares,
 `waterbox/ares64/ares/ares/n64/cpu/` and `n64/pi/dma.cpp`. The copyright and ISC permission
 notice are retained in the source, and the complete upstream notice is in
 `patches/ares/LICENSE.upstream`.
+
+## Prebuilt beta Microsoft runtime
+
+The local prebuilt beta includes the unmodified x64 Microsoft.VC143.CRT
+runtime libraries from the maintainer Visual Studio redistributable folder.
+They retain Microsoft licensing; the project MIT license does not apply to
+them. See [runtime notice and build input hashes](launcher/runtime-licenses/Microsoft-Visual-Cpp.txt).
+The application loads these DLLs locally, without a development-tool installer.

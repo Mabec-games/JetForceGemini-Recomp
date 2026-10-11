@@ -63,5 +63,30 @@ int main() {
  fast.execution_fast_deadline=fast.cpu_count;boundary(0);fast.execution_fast_deadline=UINT64_MAX;
  cpu.status_reg=0;boundary(1U<<8);
  cpu.status_reg=0x401;fast.execution_fast_pending=0x400;boundary(0);
- std::cout<<"250000 instruction/cache transitions and event boundaries matched\n";
+ // Native mode must preserve architectural bookkeeping without touching
+ // cache state or inventing elapsed time. The full handler owns clock sampling.
+ fast=JfgOriginalTimingFast{};cpu=recomp_context{};
+ fast.diagnostic_host_clock=true;fast.execution_fast_profile_ready=false;
+ fast.host_clock_poll_budget=128;fast.cpu_count=123456;guest_count=fast.cpu_count;
+ fast.io_revision=&revision;fast.io_guest_count=&guest_count;
+ fast.execution_fast_revision=revision;fast.execution_fast_deadline=UINT64_MAX;
+ cpu.status_reg=0x20000000;
+ const auto native_fallbacks=fallbacks;
+ // Null cache pointers deliberately prove the native path never reads caches.
+ for(unsigned i=0;i<127;++i) {
+  jfg_original_timing_step(i%3==0?0x400U:0U,0x80010000+i*4,0,&cpu);
+  check(fast.cpu_count==123456 && guest_count==123456,"native instructions invented time");
+  check(fast.observed_guest_instructions==i+1 && fast.execution_fast_hits==i+1,"native bookkeeping lost instructions");
+  check(fast.host_clock_poll_budget==127-i && fallbacks==native_fallbacks,"native safepoint interval changed");
+ }
+ jfg_original_timing_step(0,0x800101fc,0,&cpu);
+ check(fallbacks==native_fallbacks+1 && fast.observed_guest_instructions==127,"native sampling boundary was skipped");
+ fast.host_clock_poll_budget=128;
+ boundary(3U<<12);boundary(1U<<11);boundary(1U<<9);
+ ++revision;boundary(0);--revision;
+ fast.guest_eret_boundary=true;boundary(0);fast.guest_eret_boundary=false;
+ fast.execution_fast_deadline=fast.cpu_count;boundary(0);fast.execution_fast_deadline=UINT64_MAX;
+ cpu.status_reg=0;boundary(1U<<8);
+ cpu.status_reg=0x401;fast.execution_fast_pending=0x400;boundary(0);
+ std::cout<<"250000 reference transitions; native clock budget and event boundaries matched\n";
 }

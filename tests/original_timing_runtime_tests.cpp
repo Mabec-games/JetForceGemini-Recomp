@@ -28,7 +28,7 @@ int main() {
   check(motion.x==4096 && motion.y==-4096 && motion.wheel==3840,"unbounded host input cannot overflow accumulators");
   input.close();input.consume(down,pressed,close);check(close,"close request reaches game thread");
   std::thread producer([&]{for(int i=0;i<10000;++i){input.key(8,true);input.key(8,false);}input.key(9,true);});
-  for(int i=0;i<10000;++i)input.consume(down,pressed,close);
+  for(int i=0;i<10000;++i)(void)input.consume_frame(down,pressed,close);
   producer.join();input.consume(down,pressed,close);check(down[9] && !down[8],"mailbox final state matches producer");
   jfg::boot::OriginalTimingAiDma ai;
   check(ai.write(8,1,0,4096,783520) && ai.write(16,2210,0,4096,783520) &&

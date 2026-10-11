@@ -43,3 +43,13 @@ Boundary changes and release approval remain owner decisions.
 
 Report accidental disclosure through [security reporting](../../SECURITY.md).
 Do not paste exposed bytes into an issue as evidence.
+
+## Owner-requested prebuilt beta (2026-10-09)
+
+The `beta/simplified-install` branch implements the owner-requested prebuilt-game
+model: the compiled native game program may be included in the local review beta.
+ROMs, extracted game assets, saves, generated source bodies and debug dumps remain
+excluded. The owner will review and test the beta before any public release.
+Generated binaries are still never committed to Git. This exception concerns
+local beta packaging and does not change third-party license obligations or
+authorize uploading a release. See `docs/prebuilt-beta.txt` for scope.

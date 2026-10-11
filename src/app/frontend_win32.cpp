@@ -13,6 +13,8 @@
 #include <shlobj.h>
 #include <string>
 #include <vector>
+#include "../../launcher/native/graphics_check.hpp"
+#include "../../launcher/native/game_viewport.hpp"
 #ifdef JFG_RML_UI
 #include "native_ui.hpp"
 #endif
@@ -64,7 +66,7 @@ struct App {
   HFONT font = nullptr, titleFont = nullptr;
   HBRUSH background = CreateSolidBrush(RGB(18, 27, 40));
   fs::path profile, helper;
-  std::wstring inputReplay, progressOutput;
+  std::wstring inputReplay, progressOutput, diagnosticsDirectory;
   bool quickPlay = false;
   Process session, dialog;
   std::vector<std::unique_ptr<Process>> tools;
@@ -163,6 +165,8 @@ bool launch(Process &process, const wchar_t *action, HWND owner) {
       command += L" --input-replay " + quote(app.inputReplay);
     if (!app.progressOutput.empty())
       command += L" --progress-output " + quote(app.progressOutput);
+    if (!app.diagnosticsDirectory.empty())
+      command += L" --diagnostics " + quote(app.diagnosticsDirectory);
   }
   fs::path executable=app.helper;
 #ifdef JFG_RML_UI
@@ -235,9 +239,10 @@ void layout() {
   const int top = app.fullscreen ? 0 : scaled(24);
   MoveWindow(app.viewport, 0, top, std::max<LONG>(1, area.right),
              std::max<LONG>(1, area.bottom - top), TRUE);
-  if (app.render && IsWindow(app.render))
-    MoveWindow(app.render, 0, 0, std::max<LONG>(1, area.right),
-               std::max<LONG>(1, area.bottom - top), TRUE);
+  if (app.render && IsWindow(app.render)) {
+    const auto game = jfg::frontend::game_viewport(area.right, area.bottom - top);
+    MoveWindow(app.render, game.x, game.y, game.width, game.height, TRUE);
+  }
   if (app.shield)
     MoveWindow(app.shield, 0, top, std::max<LONG>(1, area.right),
                std::max<LONG>(1, area.bottom - top), FALSE);
@@ -253,9 +258,10 @@ void layout() {
              std::max<LONG>(1, area.right - scaled(40)), scaled(28), TRUE);
   MoveWindow(app.viewport, 0, 0, std::max<LONG>(1, area.right),
              std::max<LONG>(1, area.bottom - scaled(footer)), TRUE);
-  if (app.render && IsWindow(app.render))
-    MoveWindow(app.render, 0, 0, std::max<LONG>(1, area.right),
-               std::max<LONG>(1, area.bottom - scaled(footer)), TRUE);
+  if (app.render && IsWindow(app.render)) {
+    const auto game = jfg::frontend::game_viewport(area.right, area.bottom - scaled(footer));
+    MoveWindow(app.render, game.x, game.y, game.width, game.height, TRUE);
+  }
   if (app.home.size() >= 10) {
     const int left = 40, width = std::max(250, w - 80);
     auto move = [](HWND control, int x, int y, int width, int height) {
@@ -342,8 +348,15 @@ void pick(bool rom) {
                            : L"Native game build\0jfg-native-boot.exe\0";
   dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
   if (GetOpenFileNameW(&dialog)) {
-    SetWindowTextW(rom ? app.rom : app.runtime, path.data());
-    write(rom ? L"frontend-rom.txt" : L"frontend-runtime.txt", path.data());
+    if (rom) {
+      if (app.session.running()) return;
+      if (write(L"frontend-rom-source.txt", path.data()) &&
+          launch(app.session, L"import-rom", app.window))
+        status(L"Importing your ROM. This only needs to be done once...");
+    } else {
+      SetWindowTextW(app.runtime, path.data());
+      write(L"frontend-runtime.txt", path.data());
+    }
   }
 }
 void capture(bool enabled) {
@@ -385,7 +398,7 @@ void popup() {
     PostMessageW(app.window, WM_COMMAND, command, 0);
 }
 void persist() {
-  write(L"frontend-rom.txt", text(app.rom));
+  // The helper owns the imported ROM path; never overwrite its atomic update.
   write(L"frontend-runtime.txt", text(app.runtime));
   write(L"frontend-mods.txt", app.mods ? L"1" : L"0");
   if (!app.fullscreen)
@@ -431,7 +444,7 @@ void menus() {
       };
   add(L"&Game", {{Play, L"&Play"},
                  {Stop, L"&Stop / return home"},
-                 {Setup, L"Set up and &build"},
+                 {Setup, L"&Verify game files"},
                  {Cancel, L"Cancel setup"},
                  {0, nullptr},
                  {Quit, L"&Quit"}});
@@ -459,6 +472,17 @@ void uiAction(const std::string &a) {
     if (write(L"frontend-pause-inactive.txt", app.pauseInactive ? L"0" : L"1"))
       app.pauseInactive = !app.pauseInactive;
     else status(L"Cannot save the pause preference.");
+    return;
+  }
+  if (a == "updates") {
+    auto tool = std::make_unique<Process>();
+    write(L"frontend-update.txt", L"");
+    if (launch(*tool, L"updates", app.window)) app.tools.push_back(std::move(tool));
+    else write(L"frontend-update.txt", L"error\n\nCould not start the update checker. Try again.\n");
+    return;
+  }
+  if (a == "releases") {
+    ShellExecuteW(app.window, L"open", L"https://github.com/TK22-26/JetForceGemini-Recomp/releases/latest", nullptr, nullptr, SW_SHOWNORMAL);
     return;
   }
   if (a == "play") {
@@ -617,7 +641,7 @@ LRESULT CALLBACK procedure(HWND window, UINT message, WPARAM wparam,
         control(L"BUTTON", L"Browse...", BS_PUSHBUTTON | WS_TABSTOP, Runtime));
     app.home.push_back(
         control(L"BUTTON", L"Play", BS_DEFPUSHBUTTON | WS_TABSTOP, Play));
-    app.home.push_back(control(L"BUTTON", L"Set up and build",
+    app.home.push_back(control(L"BUTTON", L"Verify game files",
                                BS_PUSHBUTTON | WS_TABSTOP, Setup));
     app.status = control(L"STATIC", L"Preparing your profile...", SS_LEFT, 0);
     app.mods = read(L"frontend-mods.txt") == L"1";
@@ -665,6 +689,8 @@ LRESULT CALLBACK procedure(HWND window, UINT message, WPARAM wparam,
     return 0;
   }
   case WM_CTLCOLORSTATIC: {
+    if (reinterpret_cast<HWND>(lparam) == app.viewport)
+      return reinterpret_cast<LRESULT>(GetStockObject(BLACK_BRUSH));
     HDC dc = reinterpret_cast<HDC>(wparam);
     SetTextColor(dc, RGB(225, 234, 245));
     SetBkColor(dc, RGB(18, 27, 40));
@@ -735,6 +761,8 @@ LRESULT CALLBACK procedure(HWND window, UINT message, WPARAM wparam,
     }
 #endif
     std::erase_if(app.tools, [](const auto &tool) { return !tool->running(); });
+    const auto importedRom = read(L"frontend-rom.txt");
+    if (importedRom != text(app.rom)) SetWindowTextW(app.rom, importedRom.c_str());
     const auto messageText = read(L"frontend-status.txt");
     if (!messageText.empty() && messageText != app.lastStatus)
       status(messageText);
@@ -782,14 +810,15 @@ LRESULT CALLBACK procedure(HWND window, UINT message, WPARAM wparam,
     case Setup:
       if (app.session.running() || app.dialog.running())
         break;
-      if (LOWORD(wparam) == Setup &&
-          MessageBoxW(
-              window,
-              L"Setup downloads source and missing build tools. The first "
-              L"setup may download several GB and require administrator "
-              L"approval or a restart. Your ROM stays on this PC. Continue?",
-              L"Set up game", MB_OKCANCEL | MB_ICONINFORMATION) != IDOK)
-        break;
+      if (LOWORD(wparam) == Play) {
+        const auto graphics = jfg::frontend::graphics_availability();
+        if (graphics != jfg::frontend::GraphicsAvailability::hardware) {
+          status(L"Cannot start: a compatible hardware graphics device is required.");
+          MessageBoxW(window, jfg::frontend::graphics_message(graphics),
+                      L"Graphics device required", MB_OK | MB_ICONINFORMATION);
+          break;
+        }
+      }
       persist();
       app.playing = LOWORD(wparam) == Play;
       app.manualPause = false;
@@ -797,7 +826,7 @@ LRESULT CALLBACK procedure(HWND window, UINT message, WPARAM wparam,
       app.startedAt = GetTickCount64();
       if (launch(app.session, app.playing ? L"play" : L"setup",
                  app.playing ? app.viewport : window))
-        status(app.playing ? L"Starting game..." : L"Starting setup...");
+        status(app.playing ? L"Starting game..." : L"Checking game files...");
       else
         app.playing = false;
       showHome(true);
@@ -809,7 +838,7 @@ LRESULT CALLBACK procedure(HWND window, UINT message, WPARAM wparam,
       if (app.session.running() && !app.playing &&
           MessageBoxW(
               window,
-              L"Cancel setup? Completed downloads are retained for retry.",
+              L"Cancel game-file verification?",
               L"Cancel setup", MB_OKCANCEL) == IDOK) {
         TerminateJobObject(app.session.job, 1);
         status(L"Setup cancelled.");
@@ -839,12 +868,13 @@ LRESULT CALLBACK procedure(HWND window, UINT message, WPARAM wparam,
       ShellExecuteW(window, L"open", app.profile.c_str(), nullptr, nullptr,
                     SW_SHOWNORMAL);
       break;
-    case Guide:
-      ShellExecuteW(window, L"open",
-                    L"https://github.com/TK22-26/JetForceGemini-Recomp/blob/"
-                    L"main/docs/getting-started.md",
-                    nullptr, nullptr, SW_SHOWNORMAL);
+    case Guide: {
+      wchar_t module[32768]{};
+      GetModuleFileNameW(nullptr, module, 32768);
+      const auto guide = fs::path(module).parent_path() / L"START HERE.txt";
+      ShellExecuteW(window, L"open", guide.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
       break;
+    }
     case Mods:
       if (!app.session.running()) {
         app.mods = !app.mods;
@@ -869,7 +899,7 @@ LRESULT CALLBACK procedure(HWND window, UINT message, WPARAM wparam,
         app.closing = true;
         stop();
       } else
-        MessageBoxW(window, L"Finish or cancel setup before closing.",
+        MessageBoxW(window, L"Finish or cancel verification before closing.",
                     L"Jet Force Gemini", MB_OK);
     } else
       DestroyWindow(window);
@@ -894,6 +924,17 @@ LRESULT CALLBACK procedure(HWND window, UINT message, WPARAM wparam,
 }
 } // namespace
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
+  // ROM-free qualification uses the exact preflight used by Play and shortcuts.
+  int checkArgc = 0;
+  LPWSTR *checkArgv = CommandLineToArgvW(GetCommandLineW(), &checkArgc);
+  const bool checkGraphics = checkArgv && checkArgc == 2 &&
+                            std::wstring(checkArgv[1]) == L"--check-graphics";
+  LocalFree(checkArgv);
+  if (checkGraphics) {
+    const auto graphics = jfg::frontend::graphics_availability();
+    return graphics == jfg::frontend::GraphicsAvailability::hardware ? 0 :
+           graphics == jfg::frontend::GraphicsAvailability::software_only ? 3 : 4;
+  }
 #ifdef JFG_RML_UI
   int liveResult=FrontendLiveToolEntry(instance,show);if(liveResult>=0)return liveResult;
 #endif
@@ -933,13 +974,15 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
       app.inputReplay = fs::absolute(fs::path(argv[++i])).wstring();
     else if (option == L"--progress-output" && i + 1 < argc && app.progressOutput.empty())
       app.progressOutput = fs::absolute(fs::path(argv[++i])).wstring();
+    else if (option == L"--diagnostics" && i + 1 < argc && app.diagnosticsDirectory.empty())
+      app.diagnosticsDirectory = fs::absolute(fs::path(argv[++i])).wstring();
     else
       validArguments = false;
   }
   LocalFree(argv);
   if (!validArguments || (!app.quickPlay && (!app.inputReplay.empty() || !app.progressOutput.empty()))) {
     MessageBoxW(nullptr,
-                L"Use JFG-Launcher.exe [--play] [--profile <folder>]. "
+                L"Use JFG-Launcher.exe [--play] [--profile <folder>] [--diagnostics <folder>]. "
                 L"Diagnostic --input-replay <file> and --progress-output <file> require --play.",
                 L"Jet Force Gemini", MB_OK | MB_ICONERROR);
     return 2;

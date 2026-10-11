@@ -1,0 +1,24 @@
+Microsoft Visual C++ Runtime
+
+Copyright Microsoft Corporation. All rights reserved.
+
+The unmodified x64 Microsoft.VC143.CRT runtime libraries are supplied beside
+the application from the maintainer's Visual Studio 2022 redistributable folder.
+They retain Microsoft's license terms and are not covered by this project's
+MIT license. They are runtime dependencies, not Visual Studio build tools.
+
+Microsoft distribution references:
+https://learn.microsoft.com/en-us/visualstudio/releases/2022/redistribution
+https://learn.microsoft.com/en-us/cpp/windows/redistributing-visual-cpp-files
+
+Build input version and SHA-256 digests:
+concrt140.dll | 14.40.33810.0 | 4f500992a53c41a0ba44a11c33c481d8763505a7453be12d85107856ab8fb332
+msvcp140.dll | 14.40.33810.0 | a4c2229bdc2a2a630acdc095b4d86008e5c3e3bc7773174354f3da4f5beb9cde
+msvcp140_1.dll | 14.40.33810.0 | 91cd05c16c61c39788c47434602a59c17f5b08dbb3eee04ce85f8d5b70e8e604
+msvcp140_2.dll | 14.40.33810.0 | 713f17b253d802d283d306ce75647e37d83a546aeb1a881e5d9e529e856c007e
+msvcp140_atomic_wait.dll | 14.40.33810.0 | aede4ec454a82f146eb4a721e616e2086870107d88aabc6b0bd1eea0a505d935
+msvcp140_codecvt_ids.dll | 14.40.33810.0 | d52d349fbbe6abc61965c07e04cc82d8ee0cea1de7faf90a838964e3f40acedd
+vccorlib140.dll | 14.40.33810.0 | 086fab8accce357da499e6024e4290aa89dfc219867c90d90c62f8247591b95b
+vcruntime140.dll | 14.40.33810.0 | 02c6aa0e6e624411a9f19b0360a7865ab15908e26024510e5c38a9c08362c35a
+vcruntime140_1.dll | 14.40.33810.0 | 7dd9aa02e271c68ca6d5f18d651d23a15d7259715af43326578f7dde27f37637
+vcruntime140_threads.dll | 14.40.33810.0 | 75f3540ebe0876c1b173821d2669987c088c3f6db985305d160460f476536a89
