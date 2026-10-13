@@ -275,12 +275,37 @@ inline PcMoveVelocity pc_original_acceleration(PcMoveVelocity current,PcMoveVelo
   return {current.side+blend*(target.side-current.side),
           current.forward+blend*(target.forward-current.forward)};
 }
+// The native air handler steers a signed forward speed and a world heading.
+// Convert modern strafe/backward momentum into that representation once at
+// takeoff. Camera turns must not rotate the already airborne velocity.
+struct PcAirborneMotion { int yaw=0; float forward=0; };
+inline PcAirborneMotion pc_native_airborne_motion(PcMoveVelocity velocity,int basis,bool backwards) {
+  const float speed=std::hypot(velocity.side,velocity.forward);
+  if(!std::isfinite(speed) || speed<0.0001F)return {pc_wrap_angle(basis),0};
+  const float sign=backwards?1.0F:-1.0F;
+  const int offset=static_cast<int>(std::lround(std::atan2(sign*velocity.side,sign*velocity.forward)*65536.0F/6.283185307179586F));
+  return {pc_wrap_angle(basis+offset),sign*speed};
+}
+inline PcMoveVelocity pc_velocity_in_view(PcMoveVelocity velocity,int old_yaw,int view_yaw) {
+  const float angle=static_cast<float>(pc_wrap_angle(old_yaw-view_yaw))*6.283185307179586F/65536.0F;
+  const float sine=std::sin(angle),cosine=std::cos(angle);
+  return {cosine*velocity.side+sine*velocity.forward,
+          cosine*velocity.forward-sine*velocity.side};
+}
 struct PcShoulder {
   PcMoveVelocity movement_before_update{};
+  unsigned movement_before_state=0;
+  int movement_before_yaw=0;
   bool active=false,aiming=false;
-  std::uint32_t actor=0;
+  std::uint32_t actor=0,control=0;
   std::uint64_t retrace=0;
   int yaw=0,pitch=0;
+  bool acquire(std::uint32_t next_actor,std::uint32_t next_control,int native_yaw,int native_pitch) {
+    if(active && actor==next_actor && control==next_control)return false;
+    *this={};active=true;actor=next_actor;control=next_control;
+    yaw=pc_wrap_angle(native_yaw);pitch=std::clamp(native_pitch,-10922,10922);
+    return true;
+  }
 };
 struct PcOrbit {
   bool active=false;

@@ -134,6 +134,30 @@ int main() {
   for(int n=0;n<150;++n)motion=jfg::pc_original_acceleration(motion,{},2);
   check(std::hypot(motion.side,motion.forward)<0.000001F,"released keys settle without persistent drift");
   check(std::abs(jfg::pc_original_acceleration({0,-8},{},2).forward)<=4.0625F,"special-state momentum cannot reintroduce excessive ground speed");
+  // A paused input stream does not end view ownership; actor/control lifetime
+  // does. Entry facing comes from the player even if the old camera faces back.
+  jfg::PcShoulder persistent_view;
+  check(persistent_view.acquire(0x80100000,0x80101000,12000,3000),"fresh native entrance acquired");
+  persistent_view.yaw=16000;persistent_view.pitch=5000;persistent_view.retrace=10;
+  check(!persistent_view.acquire(0x80100000,0x80101000,-16000,-4000) &&
+    persistent_view.yaw==16000 && persistent_view.pitch==5000,"focus gap retains yaw and pitch instead of reseeding from camera");
+  persistent_view={};
+  check(persistent_view.acquire(0x80100000,0x80101000,-12000,1000) && persistent_view.yaw==-12000,
+    "same-address area reload acquires new native facing");
+  check(persistent_view.acquire(0x80100000,0x80102000,7000,0) && persistent_view.yaw==7000,
+    "new control object starts a new view lifetime");
+  for(const auto velocity:{jfg::PcMoveVelocity{0,-4},jfg::PcMoveVelocity{0,4},
+       jfg::PcMoveVelocity{4,0},jfg::PcMoveVelocity{-4,0},jfg::PcMoveVelocity{2.5F,-3}}) {
+    for(int heading:{0,13000,-29000})for(bool backward:{false,true}) {
+      const auto air=jfg::pc_native_airborne_motion(velocity,heading,backward);
+      const auto restored=jfg::pc_velocity_in_view({0,air.forward},air.yaw,heading);
+      check(std::abs(restored.side-velocity.side)<0.001F && std::abs(restored.forward-velocity.forward)<0.001F,
+        "airborne polar conversion preserves full world momentum in every direction");
+      const auto turned=jfg::pc_velocity_in_view({0,air.forward},air.yaw,jfg::pc_wrap_angle(heading+16384));
+      check(std::abs(turned.side+velocity.forward)<0.001F && std::abs(turned.forward-velocity.side)<0.001F,
+        "camera quarter-turn changes the view basis without rotating airborne momentum");
+    }
+  }
   check(!jfg::pc_shoulder_state(4) && !jfg::pc_shoulder_state(7) && jfg::pc_shoulder_state(11),"swimming and damage states retain guest control");
   const auto diagonal=jfg::pc_aim_movement(80,80);
   check(std::abs(diagonal.side/2.5F*diagonal.side/2.5F+diagonal.forward/3.0F*diagonal.forward/3.0F-1.0F)<0.001F,"aim diagonal stays normalized");

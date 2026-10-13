@@ -38,6 +38,9 @@ Detailed per-issue records are added as those issues receive further work.
 |---|---|---|---|
 | LAUNCHER-001 | No launcher update discovery; stale release description | Verified in tests and live API; awaiting release | [Cause, implementation and checks](launcher-update-discovery.md) |
 | PERF-001 | Goldwood drone-combat update slowdown | **Critical, open; partial candidate improvement** | [Evidence and attempts](goldwood-combat-slowdown.md) |
+| CAMERA-003 | Modern area entry faces the exit | Verified in focused tests and owner live play; local preview | [Reproduction and work](modern-controller-state-transitions.md) |
+| MOVE-003 | Dual-stick jump loses direction and air steering | Verified in focused tests and owner live play; local preview | [Reproduction and work](modern-controller-state-transitions.md) |
+| CAMERA-004 | Focus loss lowers camera angle | Verified in focused tests and owner live play; local preview | [Reproduction and work](modern-controller-state-transitions.md) |
 | CAMERA-001 | Small repeated forward camera steps | Verified in isolated replay; delivered preview, live verification pending | [Fixed modern camera boom](../../features/pc-controls.md#2026-10-11-goldwood-capture-camera-stepping-and-native-pause-save) |
 | CAMERA-002 | Large scenery-driven camera pull-ins | Open; distinct from small boom-distance steps | [Capture findings](../../features/pc-controls.md#2026-10-11-goldwood-capture-camera-stepping-and-native-pause-save) |
 | INPUT-001 | Main-menu clicks eaten; resize cursor remains in client | Corrected and regression-tested; physical focus verification remains | [Win32 activation/cursor cause and fix](../../features/pc-controls.md#live-menu-click-and-cursor-correction-2026-10-10) |

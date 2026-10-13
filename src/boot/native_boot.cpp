@@ -1453,6 +1453,7 @@ struct State : JfgOriginalTimingFast {
   bool guest_leaf_probe = false;
   bool guest_initializing = false;
   bool guest_os_probe = false;
+  std::uint64_t diagnostic_input_suspend_begin=0,diagnostic_input_suspend_end=0;
   bool timing_fixture = false;
   bool original_os_host_pacing = false;
   std::uint64_t original_window_pump_vi = UINT64_MAX;
@@ -2175,7 +2176,7 @@ public:
     auto &view=state.pc_shoulders[port];
     const auto &frame=state.pc_frames[port];
     const auto movement=ram.u8(control+0x568U);
-    if(port!=0 || !state.modern_controls_active || state.pc_input_blocked ||
+    if(port!=0 || !state.modern_controls_active || (state.pc_input_blocked && !view.active) ||
        !(frame.modern_flags&jfg::kModernActionsFlag) ||
        (frame.pc_mode!=3 && frame.pc_mode!=5) || !state.controller_ports.samples[port].connected ||
        (ram.u8(control+1U)&3U)>=3U || !jfg::pc_shoulder_state(movement) ||
@@ -2184,22 +2185,22 @@ public:
        ram.u32(target)!=0x27BDFF70U || ram.u32(target+4U)!=0xAFBF002CU) {view={};return;}
     actor_=actor;control_=control;port_=port;state.pc_shoulder_actor=actor;
     const bool aiming=movement==10U || movement==11U;
-    if(!view.active || view.actor!=actor || state.vi_retraces-view.retrace>15U) {
-      view={};view.active=true;view.actor=actor;
-      view.yaw=ram.s16(control+0x11CU);
-      view.pitch=aiming?-ram.s16(control+0x1E2U):0;
-      const auto camera=ram.u32(0x800F6DC0U);
-      if(!aiming && ram.valid(camera,0x4CU)) {
-        view.yaw=jfg::pc_shoulder_camera_yaw(ram.s16(camera));
-        view.pitch=std::clamp<int>(ram.s16(camera+2U),-10922,10922);
-      }
-    }
+    const auto camera=ram.u32(0x800F6DC0U);
+    const int native_pitch=aiming?-ram.s16(control+0x1E2U):
+      ram.valid(camera,0x4CU)?ram.s16(camera+2U):0;
+    // A new area's camera may still be looking back at its entrance. The
+    // native player owns entry facing; focus loss is not a new player/view.
+    if(view.acquire(actor,control,ram.s16(control+0x11CU),native_pitch))
+      state.gameplay_trace.event("pc-shoulder-acquire",{state.vi_retraces,actor,control,
+        static_cast<std::uint16_t>(view.yaw),static_cast<std::uint16_t>(view.pitch)});
+    view.movement_before_state=movement;
+    view.movement_before_yaw=ram.s16(control+0x11CU);
     // Capture before the native action handler eases its own velocity. The
     // optional modern easing must start here, never from the already-eased value.
     view.movement_before_update={std::bit_cast<float>(ram.u32(control+0x10U)),
                                  std::bit_cast<float>(ram.u32(control+4U))};
     view.retrace=state.vi_retraces;view.aiming=aiming;
-    if(!aiming) {
+    if(!aiming && !state.pc_input_blocked) {
       auto look=jfg::PcLookDelta{frame.look_x,frame.look_y};
       if(frame.pc_mode==3) {
         if(state.pc_mouse_used[port])look={};
@@ -2209,9 +2210,17 @@ public:
       const auto after=jfg::pc_direct_aim(view.yaw,view.pitch,look,-10922,10922);
       view.yaw=after.x;view.pitch=after.y;
     }
-    ram.put16(actor,static_cast<std::uint16_t>(view.yaw));
-    ram.put16(control+0x11CU,static_cast<std::uint16_t>(view.yaw));
-    ram.put16(control+0x10AU,0);
+    // The original airborne handler owns momentum heading and air steering.
+    // Body/view orientation is restored after physics consumes that heading.
+    if(movement==3U)ram.put16(actor,ram.u16(control+0x11CU));
+    else {
+      view.movement_before_update=jfg::pc_velocity_in_view(view.movement_before_update,
+        view.movement_before_yaw,view.yaw);
+      view.movement_before_yaw=view.yaw;
+      ram.put16(actor,static_cast<std::uint16_t>(view.yaw));
+      ram.put16(control+0x11CU,static_cast<std::uint16_t>(view.yaw));
+      ram.put16(control+0x10AU,0);
+    }
   }
   ~ModernShoulderScope() {
     if(!actor_)return;
@@ -2253,6 +2262,20 @@ void modern_shoulder_physics(State &state,std::uint32_t target,const recomp_cont
       static_cast<std::uint16_t>(view.yaw),static_cast<std::uint16_t>(view.pitch)});
   }
   view.aiming=aiming;
+  if(movement==3U) {
+    if(view.movement_before_state!=3U) {
+      const auto momentum=jfg::pc_native_airborne_motion(view.movement_before_update,
+        view.movement_before_yaw,ram.u8(control+0x569U)!=0);
+      hle::GuestMemory memory({state.rdram,kRdramSize},hle::GuestMemory::Layout::native_word_big_endian);
+      (void)memory.write_u32(control+4U,std::bit_cast<std::uint32_t>(momentum.forward));
+      (void)memory.write_u32(control+0x10U,0U);
+      ram.put16(control+0x11CU,static_cast<std::uint16_t>(momentum.yaw));
+      state.gameplay_trace.event("pc-air-takeoff",{state.vi_retraces,actor,
+        static_cast<std::uint16_t>(momentum.yaw),std::bit_cast<std::uint32_t>(momentum.forward)});
+      view.movement_before_state=3U;
+    }
+    return;
+  }
   ram.put16(actor,static_cast<std::uint16_t>(view.yaw));
   ram.put16(control+0x11CU,static_cast<std::uint16_t>(view.yaw));
   ram.put16(control+0x10AU,0);
@@ -2278,6 +2301,27 @@ void modern_shoulder_physics(State &state,std::uint32_t target,const recomp_cont
     ram.put16(control+0x120U,0);
   }
 }
+
+// The native physics routine computes world velocity, collision and gravity
+// using its own airborne heading. Only restore visual facing after it returns.
+class ModernAirPhysicsScope {
+  State& state_;std::uint32_t actor_=0;std::size_t port_=0;
+public:
+  ModernAirPhysicsScope(State& state,std::uint32_t target,const recomp_context& context):state_(state) {
+    if(target!=0x00F05ED4U && target!=0x01005BB8U && target!=0x011050BCU)return;
+    jfg::mod::Memory ram({state.rdram,kRdramSize});
+    const auto actor=static_cast<std::uint32_t>(context.r4),control=static_cast<std::uint32_t>(context.r5);
+    if(!ram.valid(actor,0xA4U) || !ram.valid(control,0x5D0U) || ram.u32(actor+0x68U)!=control ||
+       ram.u8(control+0x568U)!=3U)return;
+    const auto port=ram.u8(control);
+    if(modern_shoulder_current(state,port,actor)){actor_=actor;port_=port;}
+  }
+  ~ModernAirPhysicsScope() {
+    if(!actor_ || !modern_shoulder_current(state_,port_,actor_))return;
+    jfg::mod::Memory ram({state_.rdram,kRdramSize});
+    ram.put16(actor_,static_cast<std::uint16_t>(state_.pc_shoulders[port_].yaw));
+  }
+};
 
 // Read the native animation remapping table from the active character overlay.
 // Its first column identifies the ordinary clip behind an armed variant. Never
@@ -2772,7 +2816,13 @@ void sample_live_controller(State &state) noexcept {
     if(state.pc_aim[p].x || state.pc_aim[p].y)release_samples[p].buttons|=1;
   }
   const bool block_physical=state.controller_input_gate.blocked(ui_capture,release_samples);
-  state.pc_input_blocked=block_physical && !state.input_replay_loaded;
+  const bool replay_suspended=state.input_replay_loaded &&
+    state.vi_retraces>=state.diagnostic_input_suspend_begin &&
+    state.vi_retraces<state.diagnostic_input_suspend_end;
+  const bool previously_blocked=state.pc_input_blocked;
+  state.pc_input_blocked=(block_physical && !state.input_replay_loaded) || replay_suspended;
+  if(previously_blocked!=state.pc_input_blocked)
+    state.gameplay_trace.event("pc-input-suspended",{state.vi_retraces,state.pc_input_blocked?1U:0U});
   jfg::mod::Memory pc_memory({state.rdram,kRdramSize});
   bool want_mouse=false;
   for(std::size_t p=0;p<4;++p)
@@ -2789,16 +2839,25 @@ void sample_live_controller(State &state) noexcept {
     state.pc_mouse.clear();
   }
   state.pc_mouse_captured=want_mouse;
-  if(block_physical){state.pc_aim.fill({});state.pc_wheel.clear();state.pc_mouse.clear();state.pc_orbits.fill({});state.pc_shoulders.fill({});for(auto &motion:state.pc_stick_motion)motion.clear();for(auto &motion:state.pc_scope_motion)motion.clear();for(auto &motion:state.modern_scope_sensitivity)motion.clear();}
+  if(block_physical || replay_suspended){state.pc_aim.fill({});state.pc_wheel.clear();state.pc_mouse.clear();for(auto &motion:state.pc_stick_motion)motion.clear();for(auto &motion:state.pc_scope_motion)motion.clear();for(auto &motion:state.modern_scope_sensitivity)motion.clear();}
   if(!state.modern_controls_active || pc_memory.u8(0x800FD7BDU)!=0 || !jfg::mod::pc_gameplay_active(pc_memory,state.phase9_player_actor) ||
      jfg::mod::scripted_camera_active(pc_memory,state.phase9_player_actor)) {
     state.pc_orbits.fill({});state.pc_shoulders.fill({});for(auto &motion:state.pc_stick_motion)motion.clear();for(auto &motion:state.pc_scope_motion)motion.clear();for(auto &motion:state.modern_scope_sensitivity)motion.clear();
   }
-  if(state.modern_controls_active && !state.input_replay_loaded && !block_physical &&
+  if(state.modern_controls_active && !state.input_replay_loaded &&
      (state.input_record_path.empty() || state.pc_record_extended)) {
     for(std::size_t p=0;p<4;++p) {
       auto &frame=state.pc_frames[p];const auto &config=active_pc_input(state,p);
       frame.modern_flags=state.modern_live_flags[p];
+      if(block_physical) {
+        // Keep view identity while discarding input. The release gate below
+        // still neutralizes buttons and movement until physical controls rest.
+        if(modern_controls_selected(state,p) && state.controller_ports.samples[p].connected) {
+          frame.modern_flags=jfg::kModernActionsFlag;
+          frame.pc_mode=state.pc_devices[p]==-3?3:5;
+        }
+        continue;
+      }
       if(state.pc_devices[p]==-3 && config.mouse_aim && state.pc_mouse_captured) {
         frame.pc_mode=config.modern?3:1;
         jfg::PcLookDelta motion;
@@ -2810,7 +2869,11 @@ void sample_live_controller(State &state) noexcept {
       }
     }
   }
-  if(block_physical && !state.input_replay_loaded) {
+  if((block_physical && !state.input_replay_loaded) || replay_suspended) {
+    for(auto& frame:state.pc_frames) {
+      frame.look_x=frame.look_y=0;
+      frame.modern_flags&=jfg::kModernActionsFlag;
+    }
     buttons=0;stick_x=stick_y=0;
     for(auto& sample:state.controller_ports.samples){sample.buttons=0;sample.x=sample.y=0;}
   }
@@ -6443,7 +6506,7 @@ int dispatch(void *opaque, std::int32_t address, std::uint8_t *rdram,
     }
   }
   if(target==0x8002CF6CU && state.modern_controls_active && (state.play_mode || state.input_replay_loaded) &&
-     (state.input_record_path.empty() || state.pc_record_extended) && !state.pc_input_blocked &&
+     (state.input_record_path.empty() || state.pc_record_extended) &&
      state.pc_camera_actor==0) {
     jfg::mod::Memory ram({rdram,kRdramSize});
     const auto actor=static_cast<std::uint32_t>(context->r4),control=static_cast<std::uint32_t>(context->r5);
@@ -6458,7 +6521,8 @@ int dispatch(void *opaque, std::int32_t address, std::uint8_t *rdram,
         // native state has actually handed ownership to its aiming camera.
         const bool normal_view=(shoulder && !state.pc_shoulders[port].aiming) ||
           jfg::pc_normal_camera_owns_look((state.controller_ports.samples[port].buttons&0x10)!=0,ram.u8(control+0x568U));
-        if((frame.pc_mode==3 || frame.pc_mode==4 || frame.pc_mode==5) && normal_view) {
+        if((frame.pc_mode==3 || frame.pc_mode==4 || frame.pc_mode==5) && normal_view &&
+           (!state.pc_input_blocked || shoulder)) {
           auto* original=jfg_generated_lookup_function(static_cast<std::int32_t>(target));
           if(original) {
             auto look=jfg::PcLookDelta{frame.look_x,frame.look_y};
@@ -6609,6 +6673,14 @@ int dispatch(void *opaque, std::int32_t address, std::uint8_t *rdram,
         }
       }
     }
+  }
+  // mainChangeLevel is the explicit lifetime boundary, including transitions
+  // which recycle the same player/control addresses. Never carry the outgoing
+  // shoulder heading into a new native entrance sequence.
+  if(target==0x8004665CU && state.modern_controls_active) {
+    state.pc_shoulders.fill({});state.pc_orbits.fill({});
+    state.gameplay_trace.event("pc-view-area-reset",{state.vi_retraces,
+      static_cast<std::uint32_t>(context->r4),static_cast<std::uint32_t>(context->r5)});
   }
   if (state.navigation_mod.observing()) {
     jfg::mod::Memory memory({rdram,kRdramSize});
@@ -7012,6 +7084,7 @@ int dispatch(void *opaque, std::int32_t address, std::uint8_t *rdram,
 #if defined(_WIN32) && defined(JFG_PHASE8_LIVE_RUNTIME)
         ModernShoulderScope modern_shoulder(state,target,*context);
         modern_shoulder_physics(state,target,*context);
+        ModernAirPhysicsScope modern_air_physics(state,target,*context);
         ModernAnimationScope modern_animation(state,target,*context);
         ModernGuestTableScope modern_table(state,target,static_cast<std::uint32_t>(context->r4));
 #endif
@@ -10232,6 +10305,22 @@ int run_child(const char *path, const unsigned retrace_target,
     state.input_replay_event_count = state.input_replay.events().size();
   }
   std::free(replay_path);
+  // Bounded replay fixture for the same input-suspension path used by focus
+  // loss. It never changes desktop focus and is rejected in interactive Play.
+  char suspend_interval[48]{};
+  const auto suspend_length=GetEnvironmentVariableA("JFG_DIAGNOSTIC_INPUT_SUSPEND_VI",suspend_interval,48U);
+  if(suspend_length!=0U) {
+    if(suspend_length>=48U || !state.input_replay_loaded || state.play_mode)return 3;
+    const std::string_view spec(suspend_interval,suspend_length);
+    const auto colon=spec.find(':');
+    if(colon==std::string_view::npos)return 3;
+    auto first=std::from_chars(spec.data(),spec.data()+colon,state.diagnostic_input_suspend_begin);
+    auto last=std::from_chars(spec.data()+colon+1U,spec.data()+spec.size(),state.diagnostic_input_suspend_end);
+    if(first.ec!=std::errc{} || first.ptr!=spec.data()+colon || last.ec!=std::errc{} ||
+       last.ptr!=spec.data()+spec.size() || state.diagnostic_input_suspend_begin<3U ||
+       state.diagnostic_input_suspend_begin>=state.diagnostic_input_suspend_end ||
+       state.diagnostic_input_suspend_end>1000000U)return 3;
+  }
   char *pointer_script=nullptr;std::size_t pointer_script_size=0;
   if(_dupenv_s(&pointer_script,&pointer_script_size,"JFG_PHASE9_MENU_POINTER_REPLAY")!=0)return 3;
   if(pointer_script && *pointer_script) {
