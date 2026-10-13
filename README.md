@@ -55,17 +55,19 @@ correct inside a wide launcher window. See the [changelog](CHANGELOG.md).
 - Optional live map and live inventory tracking in a custom companion interface.
 - A unified launcher with settings available while you play.
 
-## A major quality-of-life upgrade: modern controls
+## A major quality-of-life upgrade: modern dual-stick and mouse controls
 
 The controller and keyboard/mouse overhaul brings a much more comfortable PC
 play experience. **Modern Controls** adds action-based bindings, mouse look and
 dual-stick control, so movement, camera, aiming and weapons can be set up around
 the way you play.
 
-- **Mouse and keyboard:** WASD movement and strafing, mouse look, right-click aim,
-  left-click fire, and mouse-wheel weapon switching. Keys, five mouse buttons
-  and both wheel directions can be rebound.
-- **Dual-stick controllers:** move with the left stick and look with the right.
+- **Mouse and keyboard aiming is supported:** move the mouse to look around and
+  aim, **hold right-click to aim, and left-click to shoot** with the default
+  bindings. WASD handles movement and strafing; the mouse wheel switches weapons.
+  Keys, five mouse buttons and both wheel directions can be rebound.
+- **Modern dual-stick controls are supported:** move and strafe with the left
+  stick; look around and aim with the right stick.
   Xbox/XInput and compatible SDL gamepads have device-aware layouts, including
   Xbox and PlayStation button symbols.
 - **Aim your way:** separate camera, aiming and sniper-scope sensitivity, X/Y
@@ -88,6 +90,14 @@ adaptive triggers remain future work.
 development build, newer than the published v1.1.0 ZIP. Modern gameplay remains
 experimental while camera, pointer coverage and physical-device feel are refined.
 See the [controls guide and validation notes](docs/features/pc-controls.md).
+
+![Modern Controls showing the Xbox controller diagram and action bindings](docs/images/modern-controls-xbox.png)
+
+*Xbox controller diagram: select a button to see its action and change its binding.*
+
+![Modern Controls keyboard and mouse Keys & buttons screen showing bindings and gameplay instructions](docs/images/modern-controls-keyboard.png)
+
+*Keyboard and mouse: the Keys & buttons view keeps mouse, movement and action bindings together.*
 
 ## Launcher update notifications
 
