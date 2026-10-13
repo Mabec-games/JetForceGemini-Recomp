@@ -134,6 +134,120 @@ int main() {
   for(int n=0;n<150;++n)motion=jfg::pc_original_acceleration(motion,{},2);
   check(std::hypot(motion.side,motion.forward)<0.000001F,"released keys settle without persistent drift");
   check(std::abs(jfg::pc_original_acceleration({0,-8},{},2).forward)<=4.0625F,"special-state momentum cannot reintroduce excessive ground speed");
+  // Environmental correction must stay on the user's viewing ray. Synthetic
+  // obstacles exercise the contract independently of the game's implementation.
+  const jfg::PcOrbitPoint pivot{0,40,0},low_view{0,-40,200};
+  const auto floor=[](jfg::PcOrbitPoint p){p.y=std::max(p.y,16.0F);return p;};
+  jfg::PcCameraBoom low_boom;
+  const auto low_safe=low_boom.solve(pivot,low_view,floor(low_view),1.0F/30.0F,floor);
+  check(low_safe.y>=16 && low_safe.z<200 && !low_boom.fallback,
+    "low view contracts before ground instead of being pushed upward off the boom");
+  check(std::abs((low_safe.y-40)*200+80*low_safe.z)<0.01F,
+    "floor contact preserves the input-owned camera ray");
+  const auto wall=[](jfg::PcOrbitPoint p){p.z=std::min(p.z,100.0F);return p;};
+  const jfg::PcOrbitPoint flat_view{0,40,200};
+  jfg::PcCameraBoom blocked;
+  auto wall_safe=blocked.solve(pivot,flat_view,wall(flat_view),1.0F/30.0F,wall);
+  check(wall_safe.z<=88.1F && wall_safe.z>87 && !blocked.fallback,
+    "wall collision retains inward near-plane clearance");
+  const auto open=[](jfg::PcOrbitPoint p){return p;};
+  auto retreat=blocked.solve(pivot,flat_view,flat_view,1.0F/30.0F,open);
+  check(retreat.z>wall_safe.z && retreat.z<200,"obstruction release returns gradually");
+  auto new_wall=[](jfg::PcOrbitPoint p){p.z=std::min(p.z,50.0F);return p;};
+  retreat=blocked.solve(pivot,flat_view,new_wall(flat_view),1.0F/30.0F,new_wall);
+  check(retreat.z<=38.1F,"new obstruction contracts immediately without easing through a wall");
+  const float contracted=blocked.distance;
+  retreat=blocked.solve(pivot,flat_view,flat_view,1.0F/30.0F,open);
+  check(std::abs(retreat.z-contracted)<0.001F,"short recovery hold prevents obstacle-edge chatter");
+  auto recovery=[&](int hz) {
+    jfg::PcCameraBoom boom;
+    boom.solve(pivot,flat_view,flat_view,0,open);
+    boom.solve(pivot,flat_view,wall(flat_view),0,wall);
+    for(int n=0;n<hz;++n)boom.solve(pivot,flat_view,flat_view,1.0F/hz,open);
+    return boom.distance;
+  };
+  check(std::abs(recovery(30)-recovery(60))<0.001F &&
+        std::abs(recovery(60)-recovery(120))<0.001F,
+    "collision recovery uses elapsed time consistently at 30, 60 and 120 updates");
+  jfg::PcCameraBoom rotated;
+  rotated.solve(pivot,flat_view,wall(flat_view),0,wall);
+  const jfg::PcOrbitPoint turned_view{200,40,0};
+  auto turned_camera=rotated.solve(pivot,turned_view,turned_view,1.0F/30.0F,open);
+  check(turned_camera.x>0 && std::abs(turned_camera.z)<0.001F,
+    "mouse yaw changes immediately while boom distance recovers");
+  const auto blocked_pivot=[](jfg::PcOrbitPoint p){p.y+=50;return p;};
+  jfg::PcCameraBoom impossible;
+  auto fallback=impossible.solve(pivot,flat_view,blocked_pivot(flat_view),0,blocked_pivot);
+  check(impossible.fallback && fallback.y==90,
+    "no feasible pivot retains native correction rather than forcing geometry penetration");
+  // A short recovered distance can intersect terrain even when a farther
+  // endpoint is clear. It must be tested on the new frame, not assumed safe.
+  jfg::PcCameraBoom uneven;uneven.distance=60;
+  const auto ridge=[](jfg::PcOrbitPoint p){if(p.z>45 && p.z<100)p.y=80;return p;};
+  auto over_ridge=uneven.solve(pivot,flat_view,flat_view,1.0F/120.0F,ridge);
+  check(ridge(over_ridge).y==over_ridge.y && over_ridge.z<=45,
+    "recovery cannot interpolate through a previously unseen ridge");
+  // Narrow ray tangents must remain finite, including an almost vertical
+  // view, zero simulation time and a floor whose height changes along the ray.
+  const jfg::PcOrbitPoint steep{0,-160,0.001F};
+  jfg::PcCameraBoom steep_boom;
+  const auto steep_safe=steep_boom.solve(pivot,steep,floor(steep),0,floor);
+  check(steep_safe.y>=16 && std::isfinite(steep_safe.z) && !steep_boom.fallback,
+    "near-vertical floor collision remains finite and safe");
+  const auto slope=[](jfg::PcOrbitPoint p){p.y=std::max(p.y,16.0F+0.15F*p.z);return p;};
+  jfg::PcCameraBoom slope_boom;
+  const auto slope_safe=slope_boom.solve(pivot,low_view,slope(low_view),1.0F/30.0F,slope);
+  check(std::abs(slope_safe.y-slope(slope_safe).y)<=0.01F && !slope_boom.fallback &&
+        slope_safe.z>43.0F && slope_safe.z<43.8F && slope_boom.queries<=12,
+    "sloped floor finds the clearance boundary instead of collapsing near the pivot");
+  // A shallow raised lip at the camera endpoint should require a small
+  // contraction. A vertical-only correction gives no distance bound when the
+  // desired view is horizontal; halving the boom discards valid clear space.
+  const auto shallow_lip=[](jfg::PcOrbitPoint p) {
+    if(p.z>199.0F)p.y=40.0F+0.2F*(p.z-199.0F);
+    return p;
+  };
+  jfg::PcCameraBoom lip_boom;
+  const auto lip_safe=lip_boom.solve(pivot,flat_view,shallow_lip(flat_view),0,shallow_lip);
+  check(lip_safe.z>198.0F && lip_safe.z<199.1F && !lip_boom.fallback,
+    "small floor clearance contact cannot halve an otherwise clear camera boom");
+  check(std::abs(lip_safe.y-shallow_lip(lip_safe).y)<=0.01F,
+    "closest clearance candidate is still validated against the obstacle");
+  float previous_lip=lip_safe.z;
+  for(unsigned step=1;step<=20;++step) {
+    const float edge=199.0F-float(step)*0.1F;
+    const auto moving_lip=[&](jfg::PcOrbitPoint p) {
+      if(p.z>edge)p.y=40.0F+0.2F*(p.z-edge);
+      return p;
+    };
+    const auto point=lip_boom.solve(pivot,flat_view,moving_lip(flat_view),
+      1.0F/30.0F,moving_lip);
+    check(std::abs(point.y-moving_lip(point).y)<=0.01F &&
+          point.z>edge-0.6F && previous_lip-point.z<0.7F,
+      "a gradually approaching lip cannot create a large inward distance step");
+    previous_lip=point.z;
+  }
+  const jfg::PcOrbitPoint rim_a{-114,21,521},rim_b{-183,21,370},rim_c{-139,21,535};
+  check(!jfg::pc_camera_sphere_triangle_possible({-141.3532F,45.4745F,510.6572F},
+      16,rim_a,rim_b,rim_c),
+    "Goldwood camera above the finite pond rim has no 16-unit volume contact");
+  check(jfg::pc_camera_sphere_triangle_possible({-141.3532F,35,510.6572F},
+      16,rim_a,rim_b,rim_c),"real pond-rim camera volume contact is retained");
+  check(!jfg::pc_camera_sphere_triangle_possible({20,0,20},1,{0,0,0},{10,0,0},{0,0,10}),
+    "a coplanar point outside a finite triangle does not collide with its infinite plane");
+  check(jfg::pc_camera_sphere_triangle_possible({5,0,-0.5F},1,{0,0,0},{10,0,0},{0,0,10}),
+    "sphere contacts with a triangle edge are retained");
+  check(jfg::pc_camera_sphere_triangle_possible({-0.5F,0,-0.5F},1,{0,0,0},{10,0,0},{0,0,10}),
+    "sphere contacts with a triangle corner are retained");
+  check(jfg::pc_camera_sphere_triangle_possible({0,0,0},16,{0,0,0},{0,0,0},{0,0,0}),
+    "degenerate clearance geometry keeps the native result");
+  check(!jfg::pc_camera_sphere_triangle_possible({1000,0,0},16,
+      {0,0,0},{0,0,0},{0,0,0}),
+    "a distant degenerate face cannot invalidate otherwise complete volume clearance");
+  const jfg::mod::Memory unknown_camera_ram({});
+  const jfg::PcCameraBroadphase unknown_camera_scene(unknown_camera_ram);
+  check(unknown_camera_scene.volume_possible({0,100,0},16),
+    "unknown scenery or collision registry cannot certify camera clearance");
   // A paused input stream does not end view ownership; actor/control lifetime
   // does. Entry facing comes from the player even if the old camera faces back.
   jfg::PcShoulder persistent_view;

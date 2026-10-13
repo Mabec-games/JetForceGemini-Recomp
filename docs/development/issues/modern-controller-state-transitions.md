@@ -167,4 +167,8 @@ under an exhausted guard or a public release.
 The owner confirmed that all three delivered corrections (area-entry facing,
 directional jumping and air steering, and focus-loss camera orientation) are
 validated in live play, and authorized committing them. This validates the
-local preview; it does not claim a public release. The separately reported terrain-driven camera bounce remains under investigation.
+local preview; it does not claim a public release. The separately reported
+terrain-driven camera bounce remains under investigation in
+[camera collision bounce](camera-collision-bounce.md).
+
+The three owner-validated fixes were committed as 7b1ea4ba6228c126757b2b2e966ed7c0e1de8ca4 using the maintainer identity. No public release or push was performed. The subsequent camera-collision candidate retains those fixes; its separate issue record tracks new validation and delivery.

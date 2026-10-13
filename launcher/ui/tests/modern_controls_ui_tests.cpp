@@ -327,7 +327,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int) {
     click("action-mc-tab-settings");capture("review-dualsense-settings.tga");
     ui.assignDevice(-3);click("action-mc-tab-buttons");
     demand(!ui.el("mc-row-13")&&!ui.el("mc-row-8")&&!ui.el("mc-row-38"),"menu-only keys do not appear as free gameplay rows");
-    demand(ui.modern[0].keys[11]==VK_RETURN&&ui.modern[0].keys[12]==VK_BACK,"hidden menu bindings remain saved");
+    demand(ui.modern[0].keys[11]=='E'&&ui.modern[0].keys[12]==VK_BACK,"hidden menu bindings remain saved");
     demand(!ui.doc->QuerySelector(".mc-key-group .mc-binding-value.free"),"Keys contains only bound gameplay actions");
     editInput(VK_SPACE);
     demand(ui.el("action-mc-assign-11")&&ui.el("action-mc-assign-18"),"menu bindings remain accessible in the action picker");

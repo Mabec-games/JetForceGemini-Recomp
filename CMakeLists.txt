@@ -25,6 +25,7 @@ option(JFG_BUILD_G2_PRODUCERS "Build private G2 evidence producers" OFF)
 option(JFG_BUILD_PHASE5_CAPTURE
     "Build the private Phase 5 boundary-capture producer" OFF)
 option(JFG_BUILD_PHASE6_NATIVE_BOOT "Build the private Phase 6 native M2 runner" OFF)
+option(JFG_EXPERIMENTAL_NATIVE_PLAY_TIMING "Use qualified native elapsed timing in a private interactive preview" OFF)
 option(JFG_ENABLE_RT64 "Build the pinned RT64 renderer shell" OFF)
 option(JFG_BUILD_PHASE7_RT64_RUNNER
     "Build the private-input Phase 7 RT64 captured-task runner" OFF)
@@ -269,6 +270,7 @@ if(JFG_ENABLE_RT64)
         "${jfg_rt64_root}/src/render")
 
     include(cmake/rt64_vi_presentation.cmake)
+    include(cmake/rt64_gpu_timing.cmake)
     include(cmake/rt64_depth_bounds.cmake)
 
     # The pinned Plume D3D12 backend assumes every CopyTextureRegion
@@ -529,6 +531,13 @@ if(JFG_ENABLE_GENERATED_CODE)
         else()
             set(jfg_phase6_sanitizer_id "none")
             set(jfg_phase6_build_suffix "")
+        endif()
+        if(JFG_EXPERIMENTAL_NATIVE_PLAY_TIMING)
+            if(NOT JFG_BUILD_PHASE8_LIVE)
+                message(FATAL_ERROR "Experimental native play timing requires the live runtime")
+            endif()
+            target_compile_definitions(jfg-native-boot PRIVATE JFG_EXPERIMENTAL_NATIVE_PLAY_TIMING=1)
+            string(APPEND jfg_phase6_build_suffix "-NativeTimingPreview")
         endif()
         target_compile_definitions(jfg-native-boot PRIVATE
             "JFG_PHASE6_BUILD_IDENTITY=\"${CMAKE_CXX_COMPILER_ID}-${CMAKE_CXX_COMPILER_VERSION}-$<CONFIG>${jfg_phase6_build_suffix}\""

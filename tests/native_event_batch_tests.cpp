@@ -1,4 +1,5 @@
 #include "jfg/boot/native_event_batch.hpp"
+#include "jfg/boot/native_periodic_deadline.hpp"
 #include "jfg/boot/original_timing_pi_dma.hpp"
 #include "jfg/boot/reference_si_dma.hpp"
 #include "jfg/boot/sp_status.hpp"
@@ -11,6 +12,36 @@ using namespace jfg::boot;
 static unsigned checks = 0;
 static void check(bool ok) { ++checks; if (!ok) std::abort(); }
 int main() {
+  check(!advance_native_periodic_deadline(1,1,0));
+  check(!advance_native_periodic_deadline(UINT64_MAX,0,1));
+  check(!advance_native_periodic_deadline(UINT64_MAX,UINT64_MAX,1));
+  check(!advance_native_periodic_deadline(UINT64_MAX-1,UINT64_MAX-1,2));
+  auto last_periodic=advance_native_periodic_deadline(UINT64_MAX-1,UINT64_MAX-1,1);
+  check(last_periodic && last_periodic->next==UINT64_MAX && last_periodic->elapsed==1);
+  for (std::uint64_t period=1;period<=17;++period) {
+    for (std::uint64_t first=0;first<100;first+=7) {
+      for (std::uint64_t now=0;now<512;now+=3) {
+        auto expected=first;std::uint64_t elapsed=0;
+        while (expected<=now) {expected+=period;++elapsed;}
+        auto result=advance_native_periodic_deadline(now,first,period);
+        check(result && result->next==expected && result->elapsed==elapsed);
+      }
+    }
+  }
+  constexpr std::uint32_t vi_period=783520;
+  constexpr std::uint64_t origin=UINT64_C(0x180000000);
+  for (std::uint64_t phase=0;phase<vi_period;phase+=997) {
+    const auto now=origin+phase+120U*vi_period;
+    const auto next=origin+vi_period;
+    const auto advanced=advance_native_periodic_deadline(now,next,vi_period);
+    check(advanced && advanced->elapsed==120 && advanced->next>now);
+    check(native_periodic_phase(now,next,vi_period)==phase);
+    check(native_periodic_phase(now,advanced->next,vi_period)==phase);
+    check((native_periodic_phase(now,next,vi_period)*263U/vi_period)*2U<526U);
+  }
+  check(native_periodic_phase(0,0,0)==0);
+  check(native_periodic_phase(1,3,5)==3);
+
   // Every nonempty combination and input permutation has the same observable
   // equal-time group; unrelated earlier/later deadlines are not folded into it.
   for (unsigned mask=1;mask<128;++mask) {

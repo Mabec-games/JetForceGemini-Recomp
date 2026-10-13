@@ -13,8 +13,9 @@ hold the ongoing discussion, and fixed problems are recorded in the
 The owner's recorded drone fight drops to approximately 15 game updates per
 second in its busiest section. This is an actual update-cadence deficit, separate
 from the fixed modern camera-distance stepping. Detailed logging alone does not
-explain it. A native clock replacement is under qualification and is not installed
-in the delivered preview. See the [timing investigation](features/pc-controls.md#2026-10-11-critical-goldwood-timing-investigation)
+explain it. A native elapsed-time candidate is now available in the local Modern Controls
+Preview after hidden replay qualification. Remaining slow updates and owner live
+verification keep this issue critical and open; this is not a released fix. See the [timing investigation](features/pc-controls.md#2026-10-11-critical-goldwood-timing-investigation)
 for measurements, experiments and the remaining acceptance work.
 
 ## Windows 10 setup
@@ -88,3 +89,26 @@ chests, collect NPC rewards and cross exits, but autonomous campaign
 completion is not established. Lupus hover, moving platforms, crawling,
 shooting and explosive gates and unsupported scripted traversal still need
 manual play. Normal gameplay leaves the mod off.
+
+## Background-music static
+
+Goldwood music static in the experimental native-timing preview was traced to stale compressed sample data. The local preview now loads requested samples synchronously before consumption. Source-integrity checks and normal-Play integration pass, and the owner confirmed on 2026-10-13 that the audio is fixed in the delivered local preview. See [AUDIO-001: cause, remedy and verification limits](development/issues/intermittent-music-crackle.md). No complete audio fix is publicly released.
+
+## Modern controls: transitions, jumping and focus
+
+Candidate corrections for modern area-entry facing, jump momentum/air steering and focus-loss camera reset are verified in focused tests and delivered in the local v1.1 preview. Continuously active modern input reproduced a 180-degree Goldwood entry error; the corrected heading matches the original control path. The owner confirmed all three fixes in live play on 2026-10-13, and they are committed as 7b1ea4b; broader device and unusual-state coverage remains open. See [causes, regression evidence and live checks](development/issues/modern-controller-state-transitions.md).
+
+## Modern camera: terrain bounce and pond-lip contact
+
+The revised local Modern Controls preview corrects two reproduced causes: coarse
+distance halving and a native height correction above clear finite pond geometry.
+The reconstructed Goldwood area-47 pond route now holds full camera distance
+through the prior 200-to-100 pull-ins; mouse, low-angle terrain, real obstruction
+and original Controller Mapping regressions pass. Owner live verification and
+broader scenery/moving-model coverage remain pending. Unknown geometry retains
+the native response. This is not a complete swept-volume camera overhaul.
+
+Use the Desktop JFG Camera Capture shortcut to record the next live reproduction.
+See [CAMERA-005](development/issues/camera-collision-bounce.md) for causes, failed
+and successful attempts, evidence, current package and limits. CAMERA-002 remains
+open for broader scenery-driven pull-ins.

@@ -6,7 +6,7 @@
 
 #include "hle/rt64_application.h"
 #include "hle/rt64_vi.h"
-#include "hle/rt64_workload_queue.h"
+#include "jfg/renderer/rt64_gpu_timing_hooks.hpp"
 #include "rhi/rt64_render_hooks.h"
 
 #include "xxHash/xxhash.h"
@@ -25,6 +25,7 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <vector>
 
 namespace jfg {
@@ -73,6 +74,14 @@ struct CaptureContext {
     RT64::RenderHookDraw* previous_draw = nullptr;
     RT64::RenderHookDeinit* previous_deinit = nullptr;
     std::unique_ptr<RenderBuffer> readback;
+    std::unique_ptr<RenderQueryPool> framebuffer_gpu_queries;
+    Rt64GpuTimingHook framebuffer_gpu_hook;
+    Rt64FramebufferGpuTiming framebuffer_gpu_stats;
+    Rt64FramebufferGpuTiming workload_gpu_stats;
+    const void* workload_queue_identity = nullptr;
+    std::mutex workload_gpu_mutex;
+    bool framebuffer_gpu_active = false;
+    bool framebuffer_gpu_ended = false;
     std::vector<std::byte> pixels;
     std::size_t width = 0U;
     std::size_t height = 0U;
@@ -88,6 +97,72 @@ struct CaptureContext {
     void draw(RenderCommandList* list, RenderFramebuffer* framebuffer) noexcept;
     [[nodiscard]] bool finish() noexcept;
 };
+
+void capture_gpu_timing(void* owner, Rt64GpuTimingStage stage,
+                        const void* state, void* command_list) noexcept {
+    auto& context = *static_cast<CaptureContext*>(owner);
+    if (stage == Rt64GpuTimingStage::workload_complete) {
+        // Called by the workload worker after its existing fence/query read.
+        // Application::end joins both queues before capture_deinit removes this
+        // hook. Registration is before the first submitted guest workload.
+        if (state != context.workload_queue_identity) return;
+        const std::scoped_lock lock(context.workload_gpu_mutex);
+        auto& stats = context.workload_gpu_stats;
+        const auto* times = static_cast<const std::uint64_t*>(command_list);
+        if (!times || times[0] == 0U || times[1] < times[0] ||
+            times[1]-times[0] > UINT64_MAX-stats.total_nanoseconds) {
+            stats.failed = true;
+            return;
+        }
+        ++stats.submissions;
+        stats.last_nanoseconds = times[1]-times[0];
+        stats.total_nanoseconds += stats.last_nanoseconds;
+        stats.maximum_nanoseconds = (std::max)(stats.maximum_nanoseconds, stats.last_nanoseconds);
+        return;
+    }
+    if (!context.application || state != context.application->state.get() ||
+        context.framebuffer_gpu_stats.failed) return;
+    // State::fullSync and this snapshot are serialized by the submit owner.
+    // Complete is called only after RT64's existing framebuffer worker fence.
+    try {
+        auto* list = static_cast<RenderCommandList*>(command_list);
+        if (stage == Rt64GpuTimingStage::begin) {
+            if (!context.device || !list || context.framebuffer_gpu_active)
+                throw std::runtime_error("invalid GPU timing begin");
+            if (!context.framebuffer_gpu_queries)
+                context.framebuffer_gpu_queries = context.device->createQueryPool(2);
+            if (!context.framebuffer_gpu_queries)
+                throw std::runtime_error("GPU timestamp query unavailable");
+            list->resetQueryPool(context.framebuffer_gpu_queries.get(), 0, 2);
+            list->writeTimestamp(context.framebuffer_gpu_queries.get(), 0);
+            context.framebuffer_gpu_active = true;
+            context.framebuffer_gpu_ended = false;
+        } else if (stage == Rt64GpuTimingStage::end) {
+            if (!list || !context.framebuffer_gpu_active)
+                throw std::runtime_error("invalid GPU timing end");
+            list->writeTimestamp(context.framebuffer_gpu_queries.get(), 1);
+            context.framebuffer_gpu_ended = true;
+        } else {
+            if (!context.framebuffer_gpu_active || !context.framebuffer_gpu_ended)
+                throw std::runtime_error("invalid GPU timing completion");
+            context.framebuffer_gpu_queries->queryResults();
+            const auto* times = context.framebuffer_gpu_queries->getResults();
+            if (!times || times[0] == 0U || times[1] < times[0])
+                throw std::runtime_error("invalid GPU timestamps");
+            const auto elapsed = times[1]-times[0];
+            auto& stats = context.framebuffer_gpu_stats;
+            if (elapsed > UINT64_MAX-stats.total_nanoseconds)
+                throw std::runtime_error("GPU timing accumulator overflow");
+            ++stats.submissions;
+            stats.total_nanoseconds += elapsed;
+            stats.last_nanoseconds = elapsed;
+            stats.maximum_nanoseconds = (std::max)(stats.maximum_nanoseconds, elapsed);
+            context.framebuffer_gpu_active = context.framebuffer_gpu_ended = false;
+        }
+    } catch (...) {
+        context.framebuffer_gpu_stats.failed = true;
+    }
+}
 
 void capture_init(RenderInterface* render_interface, RenderDevice* device) {
     CaptureContext* context = active_capture.load();
@@ -121,6 +196,9 @@ void capture_deinit() {
         context->previous_deinit();
     }
     const std::scoped_lock lock(context->mutex);
+    auto* timing_hook = &context->framebuffer_gpu_hook;
+    (void)rt64_gpu_timing_hook.compare_exchange_strong(timing_hook, nullptr);
+    context->framebuffer_gpu_queries.reset();
     context->device = nullptr;
 }
 
@@ -992,7 +1070,24 @@ Rt64ShellError Rt64Shell::present(const bool capture_frame) noexcept {
     try {
         if (capture_frame)
             impl_->capture->arm();
+        const auto previous_present_id = impl_->application->state->presentId;
         impl_->application->updateScreen();
+        if (capture_frame && previous_present_id != 0U &&
+            impl_->application->state->presentId == previous_present_id) {
+            // RT64 legitimately deduplicates an unchanged VI/framebuffer. A
+            // requested screenshot still needs a draw/readback. Reuse its
+            // paused-presentation mechanism after draining both queues; no
+            // guest workload or simulation update is repeated.
+            auto& app = *impl_->application;
+            app.workloadQueue->waitForWorkloadId(app.state->workloadId);
+            app.presentQueue->waitForPresentId(app.state->presentId);
+            app.workloadQueue->waitForIdle();
+            app.presentQueue->waitForIdle();
+            impl_->capture->arm();
+            auto& last = app.presentQueue->presents[app.presentQueue->previousWriteCursor()];
+            app.state->advancePresent(last, true);
+            app.presentQueue->repeatLastPresent();
+        }
         if (capture_frame) {
             impl_->application->presentQueue->waitForPresentId(
                 impl_->application->state->presentId);
@@ -1053,32 +1148,23 @@ Rt64GraphicsDiagnostics Rt64Shell::last_graphics_diagnostics()
     return diagnostics;
 }
 
-Rt64TimingSnapshot Rt64Shell::try_timing_snapshot() const noexcept {
-    if (!impl_ || !impl_->application || !impl_->application->workloadQueue)
-        return {};
-    try {
-        auto& queue = *impl_->application->workloadQueue;
-        // At this pin the render loop holds threadMutex while writing both
-        // profilers and workloadId. Do not read their vectors without that lock.
-        std::unique_lock lock(queue.threadMutex, std::try_to_lock);
-        if (!lock.owns_lock() || queue.workloadId == 0 ||
-            queue.rendererGPUProfiler.history.empty() ||
-            queue.rendererCPUProfiler.history.empty())
-            return {};
-        const auto& gpu = queue.rendererGPUProfiler;
-        Rt64TimingSnapshot result;
-        result.available = true;
-        result.workload_id = queue.workloadId;
-        result.history_index = gpu.index();
-        result.history_size = static_cast<std::uint32_t>(gpu.size());
-        result.gpu_last_ms = gpu.history[(gpu.index()+gpu.size()-1U)%gpu.size()];
-        result.gpu_average_ms = gpu.average();
-        result.gpu_max_ms = *std::max_element(gpu.history.begin(), gpu.history.end());
-        result.renderer_wall_average_ms = queue.rendererCPUProfiler.average();
-        return result;
-    } catch (...) {
-        return {};
-    }
+bool Rt64Shell::enable_framebuffer_gpu_timing() noexcept {
+    if (!impl_ || !impl_->capture || !impl_->capture->device) return false;
+    auto& context = *impl_->capture;
+    context.workload_queue_identity = context.application->workloadQueue.get();
+    context.framebuffer_gpu_hook = {&context, &capture_gpu_timing};
+    Rt64GpuTimingHook* expected = nullptr;
+    return rt64_gpu_timing_hook.compare_exchange_strong(expected, &context.framebuffer_gpu_hook);
+}
+
+Rt64FramebufferGpuTiming Rt64Shell::framebuffer_gpu_timing() const noexcept {
+    return impl_ && impl_->capture ? impl_->capture->framebuffer_gpu_stats : Rt64FramebufferGpuTiming{};
+}
+
+Rt64FramebufferGpuTiming Rt64Shell::workload_gpu_timing() const noexcept {
+    if (!impl_ || !impl_->capture) return {};
+    const std::scoped_lock lock(impl_->capture->workload_gpu_mutex);
+    return impl_->capture->workload_gpu_stats;
 }
 
 Rt64FramebufferInfo Rt64Shell::last_framebuffer() const noexcept {

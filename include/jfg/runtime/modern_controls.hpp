@@ -50,7 +50,7 @@ struct ModernControlsConfig {
         23,25,0,1,2,9,10,8,-1,-1,6,0,1,-1,-1,-1,-1,-1,11,12,13,14,2};
     // Windows virtual keys plus portable wheel IDs. Zero is unbound.
     std::array<int,kModernActionCount> keys{
-        2,1,32,17,'E',kPcWheelDown,kPcWheelUp,4,0,0,9,13,8,
+        2,1,32,17,'E',kPcWheelDown,kPcWheelUp,4,0,0,9,'E',8,
         'W','S','A','D',16,38,40,37,39,0x74};
     PcInputConfig look = [] {
         PcInputConfig c;c.modern=c.mouse_aim=c.dual_stick=1;c.mouse_invert_y=1;return c;

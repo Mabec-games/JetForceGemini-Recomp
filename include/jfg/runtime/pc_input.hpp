@@ -292,7 +292,118 @@ inline PcMoveVelocity pc_velocity_in_view(PcMoveVelocity velocity,int old_yaw,in
   return {cosine*velocity.side+sine*velocity.forward,
           cosine*velocity.forward-sine*velocity.side};
 }
+struct PcOrbitPoint { float x=0,y=0,z=0; };
+// Modern collision is a distance constraint on the input-owned viewing ray.
+// The resolver is the native scenery query (including moving models and floor/
+// ceiling clearance). A position is accepted only when that query leaves it
+// unchanged. Never interpolate an off-ray correction through solid geometry.
+struct PcCameraBoom {
+  float distance=-1.0F,hold_seconds=0.0F;
+  unsigned queries=0;
+  bool constrained=false,fallback=false;
+  template<class Resolve>
+  PcOrbitPoint solve(PcOrbitPoint focus,PcOrbitPoint wanted,
+                     PcOrbitPoint native_resolved,float seconds,Resolve resolve) {
+    queries=0;constrained=false;fallback=false;
+    const float dx=wanted.x-focus.x,dy=wanted.y-focus.y,dz=wanted.z-focus.z;
+    const float length=std::hypot(dx,dy,dz);
+    const auto finite=[](PcOrbitPoint p) {
+      return std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z);
+    };
+    const auto unchanged=[&](PcOrbitPoint a,PcOrbitPoint b) {
+      return finite(a) && finite(b) && std::hypot(a.x-b.x,a.y-b.y,a.z-b.z)<=0.01F;
+    };
+    if(!finite(focus) || !finite(wanted) || !finite(native_resolved) ||
+       !std::isfinite(length) || length<4.0F) {
+      distance=-1;hold_seconds=0;fallback=true;return native_resolved;
+    }
+    const auto at=[&](float d) {
+      const float scale=d/length;
+      return PcOrbitPoint{focus.x+dx*scale,focus.y+dy*scale,focus.z+dz*scale};
+    };
+    const auto clear=[&](float d) {
+      const auto p=at(d);++queries;return unchanged(p,resolve(p));
+    };
+    const auto limit=[&](float upper,PcOrbitPoint corrected) {
+      // Use the native correction as a candidate bound, then validate it.
+      // Floor/ceiling displacement bounds the vertical coordinate; wall
+      // contacts bound the corresponding ray coordinates. This converges
+      // quickly on ordinary planes without repeatedly bisecting the full boom.
+      for(unsigned step=0;step<8;++step) {
+        const auto requested=at(upper);
+        float bound=upper;
+        const std::array<float,3> origin{focus.x,focus.y,focus.z},
+          direction{dx/length,dy/length,dz/length},
+          request{requested.x,requested.y,requested.z},
+          result{corrected.x,corrected.y,corrected.z};
+        for(unsigned axis=0;axis<3;++axis)
+          if(std::abs(direction[axis])>0.0001F && std::isfinite(result[axis]) &&
+             (result[axis]-request[axis])*direction[axis]<-0.001F)
+            bound=std::min(bound,(result[axis]-origin[axis])/direction[axis]);
+        const bool height_only=std::abs(corrected.x-requested.x)<=0.01F &&
+                               std::abs(corrected.z-requested.z)<=0.01F;
+        // A floor/ceiling query already supplies vertical clearance. Applying
+        // the wall inset and returning a halved seed can discard nearly the
+        // entire clear boom at a shallow ledge or a horizontal view.
+        const float next=std::max(4.0F,bound<upper-0.01F
+          ?bound-(height_only?0.125F:12.0F):upper*0.5F);
+        if(next>=upper)return -1.0F;
+        const auto candidate=at(next);
+        ++queries;corrected=resolve(candidate);
+        if(unchanged(candidate,corrected)) {
+          if(!height_only)return next;
+          float accepted=next,rejected=upper;
+          // First test immediately beyond the analytic estimate. Ordinary
+          // planar floors then need no full-range search. A coarse seed is
+          // refined only within a known accepted/rejected interval.
+          const float adjacent=std::min(rejected,accepted+1.0F);
+          if(clear(adjacent))accepted=adjacent;else rejected=adjacent;
+          for(unsigned refine=0;refine<8 && rejected-accepted>0.5F;++refine) {
+            const float middle=(accepted+rejected)*0.5F;
+            if(clear(middle))accepted=middle;else rejected=middle;
+          }
+          return accepted;
+        }
+        upper=next;
+      }
+      // Bounded safety fallback, still subject to the native collision check.
+      return clear(4.0F)?4.0F:-1.0F;
+    };
+    float safe=length;
+    if(!unchanged(wanted,native_resolved)) {
+      constrained=true;safe=limit(length,native_resolved);
+      if(safe<0) {
+        // No accepted point exists near the pivot. Retain the game's safe
+        // correction for this exceptional configuration, never force clipping.
+        distance=-1;hold_seconds=0;fallback=true;return native_resolved;
+      }
+    }
+    const float dt=std::isfinite(seconds)?std::clamp(seconds,0.0F,0.25F):0.0F;
+    float selected=safe;
+    if(distance>=0 && safe>distance) {
+      const float remaining=std::max(0.0F,dt-hold_seconds);
+      hold_seconds=std::max(0.0F,hold_seconds-dt);
+      selected=safe-(safe-distance)*std::exp(-remaining/0.18F);
+      if(safe-selected<0.01F)selected=safe;
+    } else if(distance>=0 && safe<distance-0.25F)hold_seconds=0.08F;
+    // Recheck the recovered distance on this frame's ray. A turned camera or
+    // moving obstacle invalidates yesterday's safety, even at a shorter radius.
+    if(selected!=safe) {
+      const auto candidate=at(selected);
+      ++queries;const auto checked=resolve(candidate);
+      if(!unchanged(candidate,checked)) {
+        selected=limit(selected,checked);
+        if(selected<0) {
+          selected=safe;hold_seconds=0;
+        } else hold_seconds=0.08F;
+      }
+    }
+    distance=selected;
+    return at(selected);
+  }
+};
 struct PcShoulder {
+  PcCameraBoom camera_boom{};
   PcMoveVelocity movement_before_update{};
   unsigned movement_before_state=0;
   int movement_before_yaw=0;
@@ -313,7 +424,6 @@ struct PcOrbit {
   std::uint64_t retrace=0;
   int yaw=0,pitch=0;
 };
-struct PcOrbitPoint { float x=0,y=0,z=0; };
 // The guest retains its ordinary camera during flight (state 3) and swimming
 // (state 4), even with aim held. Keep look responsive there; ground aim owns
 // its separate camera. Movement and special-state aiming stay with the guest.

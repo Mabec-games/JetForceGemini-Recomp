@@ -2429,11 +2429,11 @@ def make_lookup(
         f"extern void {row['name']}(uint8_t*, recomp_context*);" for row in rows
     )
     exact_entries = [
-        f"    {{{row['section']}u, UINT32_C(0x{int(row['offset']):08X}), {row['name']}}},"
+        f"    {{{row['section']}u, UINT32_C(0x{int(row['offset']):08X}), {row['name']}, 0u}},"
         for row in rows
     ]
     continuation_entries = [
-        f"    {{{row['section']}u, UINT32_C(0x{int(row['offset']):08X}), {row['name']}}},"
+        f"    {{{row['section']}u, UINT32_C(0x{int(row['offset']):08X}), {row['name']}, UINT32_C(0x{int(row['offset']):08X})}},"
         for row in continuations
     ]
     entries = "\n".join(exact_entries + continuation_entries)
@@ -2447,8 +2447,8 @@ def make_lookup(
 
 {declarations}
 
-typedef struct {{ uint32_t section; uint32_t offset; recomp_func_t* function; }} JfgLookupEntry;
-typedef struct {{ uint32_t address; recomp_func_t* function; }} JfgLookupSlot;
+typedef struct {{ uint32_t section; uint32_t offset; recomp_func_t* function; uint32_t continuation; }} JfgLookupEntry;
+typedef struct {{ uint32_t address; recomp_func_t* function; uint32_t continuation; }} JfgLookupSlot;
 
 static const JfgLookupEntry kLookupEntries[] = {{
 {entries}
@@ -2480,12 +2480,13 @@ static void jfg_generated_lookup_rebuild(void) {{
         if (kLookupSlots[slot].function == NULL) {{
             kLookupSlots[slot].address = address;
             kLookupSlots[slot].function = entry->function;
+            kLookupSlots[slot].continuation = entry->continuation;
         }}
     }}
     jfg_generated_lookup_dirty = 0;
 }}
 
-recomp_func_t* jfg_generated_lookup_function(int32_t vram) {{
+static const JfgLookupSlot* jfg_generated_lookup_slot(int32_t vram) {{
     const size_t capacity = sizeof(kLookupSlots) / sizeof(kLookupSlots[0]);
     const uint32_t address = (uint32_t)vram;
     if (jfg_generated_lookup_dirty) {{
@@ -2495,13 +2496,29 @@ recomp_func_t* jfg_generated_lookup_function(int32_t vram) {{
                   (capacity - 1u);
     while (kLookupSlots[slot].function != NULL) {{
         if (kLookupSlots[slot].address == address) {{
-            return kLookupSlots[slot].function;
+            return &kLookupSlots[slot];
         }}
         slot = (slot + 1u) & (capacity - 1u);
     }}
     return NULL;
 }}
+
+/* Entry metadata follows the same publication, rebasing, collision precedence
+ * and invalidation as its function pointer. Zero denotes the normal entry. */
+uint32_t jfg_generated_lookup_entry_offset(int32_t vram, recomp_func_t** function) {{
+    const JfgLookupSlot* slot = jfg_generated_lookup_slot(vram);
+    if (function != NULL) *function = slot != NULL ? slot->function : NULL;
+    return slot != NULL ? slot->continuation : 0u;
+}}
 '''
+
+
+def make_lookup_entry_header() -> str:
+    return '#pragma once\n#include "funcs.h"\n#ifdef __cplusplus\nextern "C" {\n#endif\n// Resolve published function and continuation metadata from one lifecycle table.\n// Normal entry or miss returns zero; a requested function is null on a miss.\nuint32_t jfg_generated_lookup_entry_offset(int32_t vram, recomp_func_t** function);\n#ifdef __cplusplus\n}\n#endif\n'
+
+
+def make_lookup_function() -> str:
+    return '#include "generated_lookup_entry.h"\n\nrecomp_func_t* jfg_generated_lookup_function(int32_t vram) {\n    recomp_func_t* function = NULL;\n    (void)jfg_generated_lookup_entry_offset(vram, &function);\n    return function;\n}\n'
 
 
 def make_section_count(section_bases: list[int]) -> str:
@@ -2891,6 +2908,8 @@ def make_registry(
     first = authoritative[0]
     return '''#include "funcs.h"
 
+#include "generated_lookup_entry.h"
+
 #include <cstdint>
 
 ''' + "\n".join(declarations) + '''
@@ -2928,6 +2947,7 @@ extern "C" int jfg_generated_link_smoke(void) {
     auto* volatile relocation_sites_reference = &jfg_generated_relocation_sites;
     auto* volatile relocation_descriptors_reference = &jfg_generated_relocation_descriptors;
     auto* volatile lifecycle_reference = &jfg_generated_section_lifecycle;
+    auto* volatile entry_offset_reference = &jfg_generated_lookup_entry_offset;
     auto* volatile overlay_slot_reference = &jfg_generated_overlay_slot_section;
     auto* volatile metadata_reference = &jfg_generated_section_metadata;
     auto* volatile count_reference = &jfg_generated_section_count;
@@ -2938,6 +2958,7 @@ extern "C" int jfg_generated_link_smoke(void) {
     (void)relocation_sites_reference;
     (void)relocation_descriptors_reference;
     (void)lifecycle_reference;
+    (void)entry_offset_reference;
     (void)overlay_slot_reference;
     (void)metadata_reference;
     (void)count_reference;
@@ -3089,6 +3110,7 @@ def normalize(args: argparse.Namespace) -> dict[str, int]:
 
     write_text(output / "include" / "recomp.h", recomp_header)
     write_text(output / "funcs.h", make_header(authoritative, support))
+    write_text(output / "generated_lookup_entry.h", make_lookup_entry_header())
 
     baseline_sources: list[str] = []
     for row in authoritative:
@@ -3124,6 +3146,7 @@ def normalize(args: argparse.Namespace) -> dict[str, int]:
 
     support_sources = [
         ("support/lookup_table.c", make_lookup(rows, continuations)),
+        ("support/lookup_function.c", make_lookup_function()),
         ("support/section_count.c", make_section_count(section_bases)),
         ("support/section_initializer.c", make_section_initializer(initial_bases)),
         ("support/section_metadata.c", make_section_metadata(runtime_manifest)),
@@ -3169,6 +3192,7 @@ def normalize(args: argparse.Namespace) -> dict[str, int]:
     lookup_support_symbols = sorted(
         [
             "jfg_generated_lookup_function",
+            "jfg_generated_lookup_entry_offset",
             "jfg_generated_overlay_slot_section",
         ]
     )

@@ -1437,3 +1437,116 @@ The ongoing bug/attempt/resolution record is [PERF-001](../development/issues/go
 It includes failed replay comparisons, partial timing improvements and future
 60+ FPS compatibility requirements. Future issues follow the persistent
 [issue documentation policy](../development/issues/README.md).
+
+
+The contiguous native-timing candidate has completed hidden correctness and
+performance qualification; see [PERF-001](../development/issues/goldwood-combat-slowdown.md#contiguous-candidate-qualification-and-handoff)
+for exact measurements, installation status, retained failures and owner acceptance.
+It does not resolve remaining slow updates or provide 60+ Hz rendering.
+
+
+### Modern keyboard Confirm default, 2026-10-11
+
+At the owner's request, new/reset modern profiles use **E** for menu Confirm,
+sharing E with gameplay Interact in separate contexts. Existing custom bindings
+remain loadable and are not globally migrated. The owner's preview profile will
+receive the requested change during delivery, with all other preferences kept.
+Implementation is pending build/test qualification and preview installation.
+
+
+### E menu-confirm delivery (2026-10-11 UTC)
+
+Modern keyboard/mouse menu Confirm now defaults to **E**, sharing E with Interact
+in its separate gameplay context. Custom saved bindings (including an explicitly
+chosen Enter) still round-trip, and original Controller Mapping keeps its own
+bindings. The owner's preview profile was changed from the former Enter default
+to E while closed; its save, launcher settings and other profile files were
+verified unchanged. The existing desktop shortcut still targets the same v1.1
+launcher/package directory.
+
+Verification: 126 modern-controls checks and 546 native RmlUi checks passed.
+The rebuilt launcher and runtime were installed and their package hashes checked.
+Runtime SHA-256: `234fdcc4c5d7e207a11c566007eb3c75637587003cfd2e714e2bf53169aeb6ff`.
+The accompanying [audio investigation](../development/issues/intermittent-music-crackle.md)
+remains open; this delivery does not claim a crackle fix.
+
+
+### 2026-10-13: native audio sample readiness preview
+
+The native-timing preview now satisfies the synthesis sample callback's readiness
+contract by loading from the resident ROM before publishing each cache entry.
+This removes the stale-sample failure reproduced under faster native execution;
+it does not change controls, music gain, DSP mixing, or global PI delays. The
+existing v1.1 Modern Controls Preview shortcut selects the tested local runtime,
+with ROM selection, saves and mappings preserved. Source checks and hidden
+normal-Play integration pass; owner listening/live verification is still pending.
+See [AUDIO-001](../development/issues/intermittent-music-crackle.md) for the causal
+evidence, exact validation and implications for future 60+ FPS work.
+
+### 2026-10-13: Native entry facing, jump momentum and focus continuity
+
+The local v1.1 preview now seeds modern entry facing from the native player, preserves full takeoff momentum and original air steering, and keeps camera orientation when physical input is suspended. Tests reproduce the old 180-degree Goldwood entry error, cover all three characters and both timing paths, and retain byte-identical original-mapping replay state. The owner-accepted audio repair remains enabled.
+
+See the [issue record](../development/issues/modern-controller-state-transitions.md) for causes, failed/inconclusive fixtures, qualification, refresh-rate implications and the remaining exact-route/physical-device live checks. These are local-preview results, not a public-release claim.
+
+### 2026-10-13: modern camera collision response
+
+The local v1.1 Modern Controls Preview now separates input orientation from
+collision-constrained camera distance. Native-validated positions stay on the
+chosen viewing ray, feet-only visibility no longer pulls the modern camera in,
+and outward recovery is eased without filtering mouse/stick rotation.
+Focused low-angle Goldwood tests reduce the maximum vertical camera step from
+45.1 to 5.1 world units on the native-timing dual-stick route. Original mapping's
+qualified replay remains byte-identical, and jump/focus regressions pass.
+
+This is a local candidate awaiting owner live verification, including the
+reported pond lip outside Goldwood spawn. A separate adjacent-obstacle replay
+reached a hollow stump; it must not be presented as exact pond verification.
+The native collision margin and queries are retained, large necessary pull-ins
+can still occur, and this is not a new sphere-sweep collision engine.
+See [CAMERA-005](../development/issues/camera-collision-bounce.md) for the cause,
+rejected expensive attempt, timing caveat, actual validation and remaining work.
+
+The preceding area-entry, jump/air-steering and focus-retention fixes were
+owner-validated and committed as 7b1ea4ba6228c126757b2b2e966ed7c0e1de8ca4.
+
+
+## 2026-10-13: pond false contacts and inward distance halving
+
+The first camera candidate improved upward bounce but the owner still saw inward
+jumps. Recovery of the final map identified the actual pond in Goldwood area 47;
+a reconstructed route reproduced two 200-to-100 camera pull-ins above clear
+geometry. Refining the distance search alone was insufficient. The current
+preview additionally rejects height-only native corrections only when a finite
+16-unit camera sphere and its focus ray are both proven clear. Unknown geometry
+and potential contacts keep native handling.
+
+The revised local package is build/modern-controls-camera-clearance-20261013
+(runtime 15c40b95d95cf48a388f652419efe7bedd0f42f6d6b641059a1ff65498241613).
+The reconstructed pond holds full distance; scripted mouse, low-angle, genuine
+obstruction, portable control/audio suites and original Mapping full-memory
+parity pass. Owner live verification and broad scenery coverage remain pending.
+
+The ordinary preview had not recorded a full route. Desktop JFG Camera Capture
+now explicitly enables the launcher's diagnostic recording and preserves initial
+settings/save data under Desktop/JFG Camera Captures. It follows the updated
+preview shortcut automatically. See the [CAMERA-005 follow-up](../development/issues/camera-collision-bounce.md)
+for the full issue history, partial attempt, measured costs, install receipt,
+recording limitation and future high-refresh/swept-volume requirements.
+
+
+### Develop source integration, 2026-10-13
+
+The completed controls, camera, native-timing and audio investigation changes,
+regressions and issue records are integrated on local develop. This includes the
+previously committed area-entry/jump/focus corrections. The owner has accepted
+the audio repair and those three controls fixes; the latest pond-clearance
+candidate still awaits live verification. This source integration is not a
+public release, does not resolve the remaining PERF-001/CAMERA-002 scope, and
+does not merge the separate high-refresh research branch.
+
+Integration validation rebuilds eight focused portable suites from the isolated
+develop worktree and runs the generated-entry, private-root generator and native
+span regressions there. The previously recorded runtime replay and preview
+qualification remain linked in the issue records. Original workspace files,
+other pending edits and installed user profiles are preserved.

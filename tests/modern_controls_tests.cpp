@@ -52,7 +52,7 @@ int main(int argc,char **argv) {
         parsed.pad[index(ModernAction::menu_save)]==2,"legacy profile receives separate Save defaults");
     auto saveConflict=version3;
     saveConflict.replace(saveConflict.find("pad.menu_confirm=0"),18,"pad.menu_confirm=2");
-    saveConflict.replace(saveConflict.find("key.menu_confirm=13"),19,"key.menu_confirm=116");
+    saveConflict.replace(saveConflict.find("key.menu_confirm=69"),19,"key.menu_confirm=116");
     check(parse_modern_controls(saveConflict,parsed) && parsed.pad[index(ModernAction::menu_save)]==-1 &&
         parsed.keys[index(ModernAction::menu_save)]==0,"migration preserves conflicting custom menu bindings");
     invalid(version3+"key.menu_save=116\n");
@@ -137,6 +137,16 @@ int main(int argc,char **argv) {
     check(!(map_modern_actions(sample_modern_pad(config,pad),false).buttons&8),"explicit unbind works");
     config={};std::array<bool,258> keys{};
     const auto keyboard=[&](){return sample_modern_keyboard(config,[&](int k){return keys[static_cast<std::size_t>(k)];});};
+    check(config.keys[index(ModernAction::menu_confirm)]=='E',"E defaults to modern confirm");
+    keys['E']=true;
+    check(map_modern_actions(keyboard(),true).buttons==0x8000,"E confirms in menus");
+    check(map_modern_actions(keyboard(),false).buttons==0x8000,"E still interacts in gameplay");
+    keys={};keys[13]=true;
+    check(map_modern_actions(keyboard(),true).buttons==0,"Enter is no longer the modern default confirm");
+    auto explicitEnter=config;explicitEnter.keys[index(ModernAction::menu_confirm)]=13;
+    check(parse_modern_controls(serialize_modern_controls(explicitEnter),parsed) &&
+        parsed.keys[index(ModernAction::menu_confirm)]==13,"explicit saved Enter binding remains supported");
+    keys={};
     keys[0x74]=true;
     check(map_modern_actions(keyboard(),true,true).buttons==0x2000,"F5 saves in pause root");
     check(map_modern_actions(keyboard(),true,false).buttons==0 && map_modern_actions(keyboard(),false,true).buttons==0,"F5 has no gameplay or unrelated menu side effect");

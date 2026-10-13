@@ -125,18 +125,15 @@ struct Rt64FrameView {
     }
 };
 
-// Diagnostic snapshot of RT64's already completed timestamp queries. The
-// rolling history describes workloads, not necessarily the current submission.
-// Renderer wall time includes waits and is not a CPU utilization measurement.
-struct Rt64TimingSnapshot {
-    bool available = false;
-    std::uint64_t workload_id = 0;
-    std::uint32_t history_index = 0;
-    std::uint32_t history_size = 0;
-    double gpu_last_ms = 0;
-    double gpu_average_ms = 0;
-    double gpu_max_ms = 0;
-    double renderer_wall_average_ms = 0;
+// Cumulative GPU durations from already fenced framebuffer submissions.
+// Excludes host submission, presentation and queue delay before the first marker.
+// Includes any GPU-side dependency waits between the two markers.
+struct Rt64FramebufferGpuTiming {
+    std::uint64_t submissions = 0;
+    std::uint64_t total_nanoseconds = 0;
+    std::uint64_t last_nanoseconds = 0;
+    std::uint64_t maximum_nanoseconds = 0;
+    bool failed = false;
 };
 
 struct Rt64GraphicsDiagnostics {
@@ -223,9 +220,12 @@ public:
     [[nodiscard]] std::size_t last_command_count() const noexcept;
     [[nodiscard]] Rt64GraphicsDiagnostics last_graphics_diagnostics()
         const noexcept;
-    // Try-locks the renderer's owner mutex; never waits for rendering or queries.
-    // A busy renderer reports unavailable rather than blocking or racing.
-    [[nodiscard]] Rt64TimingSnapshot try_timing_snapshot() const noexcept;
+    // Internal profiling only; configure before guest submissions begin.
+    [[nodiscard]] bool enable_framebuffer_gpu_timing() noexcept;
+    // Read on the same submit owner; does not wait or issue GPU work.
+    [[nodiscard]] Rt64FramebufferGpuTiming framebuffer_gpu_timing() const noexcept;
+    // Completed regular-workload timestamps; snapshot synchronized with its worker.
+    [[nodiscard]] Rt64FramebufferGpuTiming workload_gpu_timing() const noexcept;
     [[nodiscard]] Rt64FramebufferInfo last_framebuffer() const noexcept;
     [[nodiscard]] Rt64FrameView last_presented_frame() const noexcept;
 
