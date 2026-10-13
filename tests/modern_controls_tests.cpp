@@ -33,7 +33,7 @@ int main(int argc,char **argv) {
     invalid("");invalid(std::string(8193,'x'));invalid(custom+"enabled=0\n");invalid(custom+"unknown=0\n");
     invalid(custom.substr(custom.find('\n')+1));
     for(auto pair:std::array<std::pair<std::string,std::string>,10>{{
-        {"version=4","version=5"},{"enabled=1","enabled=2"},{"aim_toggle=1","aim_toggle=-1"},
+        {"version=5","version=6"},{"enabled=1","enabled=2"},{"aim_toggle=1","aim_toggle=-1"},
         {"pad.jump=10","pad.jump=27"},{"key.fire=70","key.fire=258"},
         {"movement_stick=0","movement_stick=2"},{"movement_deadzone=7849","movement_deadzone=32768"},
         {"axis_threshold=8689","axis_threshold=0"},{"look.modern=1","look.modern=0"},
@@ -43,6 +43,18 @@ int main(int argc,char **argv) {
     check(!ModernControlsConfig{}.mouse_original_acceleration,"original acceleration defaults off");
     auto accelerated=config;accelerated.mouse_original_acceleration=true;
     check(parse_modern_controls(serialize_modern_controls(accelerated),parsed) && parsed.mouse_original_acceleration,"original acceleration saves and reloads enabled");
+    auto version4=defaults;version4.replace(0,9,"version=4");
+    version4.replace(version4.find("key.menu_back=81"),16,"key.menu_back=8");
+    check(parse_modern_controls(version4,parsed) && parsed.keys[index(ModernAction::menu_back)]=='Q',"old Backspace default migrates to Q");
+    auto moveQ=version4;moveQ.replace(moveQ.find("key.move_left=65"),16,"key.move_left=81");
+    check(parse_modern_controls(moveQ,parsed) && parsed.keys[index(ModernAction::menu_back)]==8,
+        "Q movement binding prevents Back migration conflict");
+    check(modern_binding_conflicts(ModernAction::move_left,ModernAction::menu_back),
+        "movement and menu actions share a context");
+    auto customBack=version4;customBack.replace(customBack.find("key.menu_back=8"),15,"key.menu_back=70");
+    check(parse_modern_controls(customBack,parsed) && parsed.keys[index(ModernAction::menu_back)]=='F',"custom Back binding preserved");
+    auto takenQ=version4;takenQ.replace(takenQ.find("key.menu_confirm=69"),19,"key.menu_confirm=81");
+    check(parse_modern_controls(takenQ,parsed) && parsed.keys[index(ModernAction::menu_back)]==8,"migration does not steal Q");
     auto version3=defaults;version3.replace(0,9,"version=3");
     for(const std::string field:{"pad.menu_save=2\n","key.menu_save=116\n"}) {
         const auto at=version3.find(field);check(at!=version3.npos,"legacy save fixture field");
@@ -138,6 +150,18 @@ int main(int argc,char **argv) {
     config={};std::array<bool,258> keys{};
     const auto keyboard=[&](){return sample_modern_keyboard(config,[&](int k){return keys[static_cast<std::size_t>(k)];});};
     check(config.keys[index(ModernAction::menu_confirm)]=='E',"E defaults to modern confirm");
+    check(config.keys[index(ModernAction::menu_back)]=='Q',"Q is the discoverable Back default");
+    keys['Q']=true;check(map_modern_actions(keyboard(),true).buttons==0x4000,"Q backs out");
+    keys={};keys['A']=true;check(map_modern_actions(keyboard(),true).x==-80,"A navigates menus left");
+    keys={};keys['D']=true;check(map_modern_actions(keyboard(),true).x==80,"D navigates menus right");
+    keys={};keys['W']=true;check(map_modern_actions(keyboard(),true).y==80,"W navigates menus up");
+    keys={};keys['S']=true;check(map_modern_actions(keyboard(),true).y==-80,"S navigates menus down");
+    keys['W']=true;check(map_modern_actions(keyboard(),true).y==0,"opposite movement directions cancel in menus");
+    keys={};keys['A']=keys[39]=true;
+    check(map_modern_actions(keyboard(),true).x==80,"explicit menu direction takes precedence");
+    config.keys[index(ModernAction::move_left)]='J';keys={};keys['J']=true;
+    check(map_modern_actions(keyboard(),true).x==-80,"rebound movement keys navigate menus");
+    config={};keys={};
     keys['E']=true;
     check(map_modern_actions(keyboard(),true).buttons==0x8000,"E confirms in menus");
     check(map_modern_actions(keyboard(),false).buttons==0x8000,"E still interacts in gameplay");
@@ -189,7 +213,7 @@ int main(int argc,char **argv) {
     check(rebind_modern_action(config,false,ModernAction::jump,-1)==ModernBindResult::changed,"UI command supports clearing");
 
     config={};keys={};keys['W']=true;
-    check(map_modern_actions(keyboard(),true).y==0,"keyboard gameplay movement does not leak into menu bindings");
+    check(map_modern_actions(keyboard(),true).y==80,"keyboard movement also navigates menus");
     keys[38]=true;check(map_modern_actions(keyboard(),true).y==80,"dedicated keyboard menu navigation works");
     check(rebind_modern_action(config,false,ModernAction::move_forward,9)==ModernBindResult::invalid,"pad editor rejects unsupported digital movement rows");
     auto badPad=config;badPad.pad[index(ModernAction::move_forward)]=9;

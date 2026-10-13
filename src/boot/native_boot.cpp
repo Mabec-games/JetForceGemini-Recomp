@@ -1644,6 +1644,8 @@ struct State : JfgOriginalTimingFast {
   jfg::MenuPointerFrame menu_pointer_frame{};
   jfg::GuestMenuState guest_menu{};
   jfg::GuestMenuPointer menu_pointer;
+  std::array<jfg::GuestMenuConfirm,4> menu_confirm;
+  std::optional<jfg::GuestMenuState> menu_selection_feedback;
   jfg::MenuPointerReplay menu_pointer_replay;
 
   std::array<bool, 256U> host_keys{};
@@ -2588,6 +2590,7 @@ void sample_controller_ports(State &state,bool discover_sdl=true) {
         !menu && !state.pc_input_blocked && state.pc_device_ready[p]);
       sample=jfg::map_modern_actions(input,menu,state.guest_menu.kind==jfg::GuestMenuKind::pause_root &&
         state.guest_menu.ready && (state.guest_menu.enabled&0x100U)!=0);
+      sample.buttons=state.menu_confirm[p].apply(menu?state.guest_menu:jfg::GuestMenuState{},sample.buttons);
       state.modern_live_flags[p]=jfg::modern_scope_flags(menu?0:input.held);
       if(device>=0 && !menu)state.pc_aim[p]=jfg::pc_stick_look(config.look,
         hardware[static_cast<std::size_t>(device)],config.movement_stick,(sample.buttons&0x10)!=0);
@@ -2680,17 +2683,36 @@ jfg::GuestMenuState decode_menu_overlay(State &state,unsigned section,std::uint3
   return decode(memory,base);
 }
 jfg::GuestMenuState read_pause_menu(State &state) {
+  using Kind=jfg::GuestMenuKind;
   jfg::mod::Memory ram({state.rdram,kRdramSize});
   if(ram.u8(0x800FD7BDU)==0 || ram.u8(0x800A51B0U)!=16)return {};
   return decode_menu_overlay(state,19U,0x1400U,[&](const auto &manager,std::uint32_t mb)->jfg::GuestMenuState {
     if(manager.u32(mb)!=0x27BDFFE8U)return {};
+    const auto screen=manager.u32(mb+0x13F4U);
+    state.gameplay_trace.event("pause-page",{state.vi_retraces,screen,manager.u32(mb+0x13F8U),manager.u32(mb+0x13C4U)});
+    if(manager.u32(mb+0x13F8U)!=0 || manager.u32(mb+0x13C4U)!=2)return {};
+    if(screen==6) {
+      return decode_menu_overlay(state,36U,0x2060U,[&](const auto& m,std::uint32_t base)->jfg::GuestMenuState {
+        if(m.u32(base+0x1A0U)!=0x27BDFED8U || m.u32(base+0x2038U)!=0 || m.u32(base+0x2050U)!=0)return {};
+        const auto page=m.u32(base+0x1F34U),selected=m.u32(base+0x2030U);
+        state.gameplay_trace.event("options-page",{state.vi_retraces,page,selected,m.u32(base+0x2040U)});
+        if(page>9 || selected>=8)return {};
+        unsigned enabled=255U;
+        if(ram.u32(0x800FF384U)&0x40000000U)enabled&=~8U; // unavailable screen-size option
+        return {page==8?Kind::options:Kind::option_detail,static_cast<int>(selected),enabled,true,base,page};
+      });
+    }
+    // These native pages expose B as Back; the modern Confirm adapter also
+    // dismisses informational pages. Map keeps its native travel/confirm action.
+    if(screen==2)return {Kind::pause_map,0,0,true,mb,screen};
+    if(screen==3 || screen==4 || screen==5 || screen==7 || screen==9)
+      return {Kind::pause_info,0,0,true,mb,screen};
+    if(screen!=1 && screen!=8)return {};
     return decode_menu_overlay(state,18U,0x6D18U,[&](const auto &m,std::uint32_t base)->jfg::GuestMenuState {
-      if(m.u32(base+0x2464U)!=0x27BDFE60U)return {};
-      state.gameplay_trace.event("pause-menu-state",{state.vi_retraces,manager.u32(mb+0x13F4U),manager.u32(mb+0x13F8U),manager.u32(mb+0x13C4U),
-        m.u32(base+0x6680U),m.u8(base+0x67B4U),m.u8(base+0x6D04U),m.u8(base+0x6D05U),m.u16(base+0x6D14U),m.u16(base+0x6D16U)});
-      if(manager.u32(mb+0x13F4U)!=1 || manager.u32(mb+0x13F8U)!=0 ||
-         manager.u32(mb+0x13C4U)!=2 || m.u32(base+0x6680U)!=0 || m.u8(base+0x67B4U)!=0 ||
-         m.u8(base+0x6D05U)!=255 || m.u8(base+0x6D04U)>=8)return {};
+      if(m.u32(base+0x2464U)!=0x27BDFE60U || m.u32(base+0x6680U)!=0)return {};
+      if(m.u8(base+0x67B4U)!=0)
+        return {Kind::pause_character,0,7U,m.u8(base+0x6D07U)==255 && m.u8(base+0x6D08U)==0,base};
+      if(m.u8(base+0x6D05U)!=255 || m.u8(base+0x6D04U)>=8)return {};
       const auto player=ram.u32(0x800FD7D4U);
       if(!ram.valid(player,0xC0U))return {};
       const auto flag=[&](unsigned n){return (ram.u8(player+0x30U+(n>>3U))&(1U<<(n&7U)))!=0;};
@@ -2698,7 +2720,7 @@ jfg::GuestMenuState read_pause_menu(State &state) {
       if(flag(0x64U))enabled&=~2U;
       if(!flag(0x5FU))enabled&=~128U;
       if(m.s16(base+0x6D14U)==0 && m.s16(base+0x6D16U)==0)enabled|=256U;
-      return {jfg::GuestMenuKind::pause_root,m.u8(base+0x6D04U),enabled,true,base};
+      return {Kind::pause_root,m.u8(base+0x6D04U),enabled,true,base};
     });
   });
 }
@@ -2757,20 +2779,25 @@ jfg::GuestMenuState read_guest_menu(State &state) noexcept {
 bool select_guest_menu(State& state, jfg::GuestMenuKind kind, int target) noexcept {
   const auto live=read_guest_menu(state);
   if(!live.ready || live.kind!=kind || live.identity!=state.guest_menu.identity ||
-     target<0 || target>=(kind==jfg::GuestMenuKind::pause_root?9:6) || !(live.enabled&(1U<<target)))return false;
+     target<0 || target>=(kind==jfg::GuestMenuKind::pause_root?9:kind==jfg::GuestMenuKind::options?8:6) || !(live.enabled&(1U<<target)))return false;
   if(kind==jfg::GuestMenuKind::pause_root && target==8)return true;
   std::uint32_t address=0;
   if(kind==jfg::GuestMenuKind::start)address=0x800A5060U;
   else if(kind==jfg::GuestMenuKind::saves || kind==jfg::GuestMenuKind::save_actions)
     address=live.identity+0x2F5FU;
   else if(kind==jfg::GuestMenuKind::pause_root)address=live.identity+0x6D04U;
+  else if(kind==jfg::GuestMenuKind::options)address=live.identity+0x2030U;
   if(!address)return false;
   // Relocated overlay addresses can be below KSEG0. Use the same wrapping
   // host offset as read_guest_menu's validated overlay view, not physical RAM
   // aliasing. The live decoder above has proved this exact field is mapped.
   const std::uint32_t offset=address-kKseg0;
   if(offset>=kGuestAddressSpan)return false;
-  state.rdram[offset^3U]=static_cast<std::uint8_t>(target);
+  if(kind==jfg::GuestMenuKind::options) {
+    for(unsigned i=0;i<4;++i)state.rdram[(offset+i)^3U]=i==3?static_cast<std::uint8_t>(target):0;
+  } else state.rdram[offset^3U]=static_cast<std::uint8_t>(target);
+  if(target!=live.selected && (kind==jfg::GuestMenuKind::pause_root || kind==jfg::GuestMenuKind::options))
+    state.menu_selection_feedback=live;
   if(kind==jfg::GuestMenuKind::pause_root && target!=live.selected) {
     for(unsigned i=0;i<4;++i) {
       state.rdram[((live.identity+0x6D00U-kKseg0+i)^3U)]=i==3?255:0;
@@ -2933,8 +2960,8 @@ void sample_live_controller(State &state) noexcept {
     modern_controls_selected(state,0) && state.pc_devices[0]==-3 && connected);
   const auto pointer_packet=state.menu_pointer.sample(state.guest_menu,point,pointer.moved,
     pointer.left_press,pointer.right_press,pointer_allowed,buttons!=0 || stick_x!=0 || stick_y!=0);
-  if(pointer_packet.buttons || pointer_packet.target>=0) {
-    buttons=pointer_packet.buttons;stick_x=stick_y=0;
+  if(pointer_packet.buttons || pointer_packet.target>=0 || pointer_packet.x || pointer_packet.y) {
+    buttons=pointer_packet.buttons;stick_x=pointer_packet.x;stick_y=pointer_packet.y;
     if(pointer_packet.target>=0) {
       menu_kind=static_cast<std::uint8_t>(state.guest_menu.kind);
       menu_target=static_cast<std::uint8_t>(pointer_packet.target+1);
@@ -6742,6 +6769,42 @@ int dispatch(void *opaque, std::int32_t address, std::uint8_t *rdram,
       }
     }
   }
+  // Modern Jump is a locomotion action even while Aim is held. Reuse the
+  // character's complete native ground jump handler (animation, collision
+  // eligibility, takeoff and weapon logic); never synthesize vertical velocity.
+  // Its ABI matches the aim handler's actor/control/movement/heading/ticks.
+  const std::uint32_t aim_jump_ground=
+    (target==0x00F0418CU || target==0x00F04658U)?0x00F02B2CU:
+    (target==0x01003F30U || target==0x01004440U)?0x01002708U:
+    (target==0x0110430CU || target==0x01104614U)?0x01102A54U:0U;
+  if(aim_jump_ground && state.modern_controls_active && !state.pc_input_blocked) {
+    jfg::mod::Memory ram({rdram,kRdramSize});
+    const auto actor=static_cast<std::uint32_t>(context->r4),control=static_cast<std::uint32_t>(context->r5);
+    if(ram.valid(actor,0xA4U) && ram.valid(control,0x5D0U) && ram.u32(actor+0x68U)==control) {
+      const auto port=ram.u8(control),movement=ram.u8(control+0x568U);
+      const auto table=ram.u32(0x800A18B0U);
+      if(modern_shoulder_current(state,port,actor) &&
+         (movement==10U || movement==11U) && ram.u8(control+0x534U)==0 &&
+         (ram.u32(0x800F6DA4U)&8U) && ram.valid(table,0x24U) && ram.u32(table+0xCU)==8U &&
+         !jfg::mod::scripted_camera_active(ram,actor)) {
+        if(auto* ground=jfg_generated_lookup_function(static_cast<std::int32_t>(aim_jump_ground))) {
+          hle::GuestMemory memory({rdram,kRdramSize},hle::GuestMemory::Layout::native_word_big_endian);
+          const auto held=ram.u32(0x800F6DA0U);
+          // Ground's Aim-first branch otherwise prevents its native Jump test.
+          // Mask only that branch for this action dispatch; retain the user's
+          // held/toggled Aim intent so ordinary landing re-enters aiming.
+          (void)memory.write_u32(0x800F6DA0U,held&~0x10U);
+          ram.put16(control+0x568U,ram.u8(control+0x569U));
+          ground(rdram,context);
+          (void)memory.write_u32(0x800F6DA0U,held);
+          const auto after=ram.u8(control+0x568U);
+          if(after==0U)ram.put16(control+0x568U,static_cast<std::uint16_t>((movement<<8U)|ram.u8(control+0x569U)));
+          state.gameplay_trace.event("modern-aim-jump",{state.vi_retraces,actor,movement,after,held});
+          return 1;
+        }
+      }
+    }
+  }
   // Separate look input is recorded alongside movement; older replays remain stock.
   if(target==0x8003AABCU && state.modern_controls_active && (state.play_mode || state.input_replay_loaded) &&
      (state.input_record_path.empty() || state.pc_record_extended) && !state.pc_input_blocked) {
@@ -7269,6 +7332,23 @@ int dispatch(void *opaque, std::int32_t address, std::uint8_t *rdram,
 #endif
       {
 #if defined(_WIN32) && defined(JFG_PHASE8_LIVE_RUNTIME)
+        // Sound must run on the native menu update stack, never on the input
+        // polling/audio thread. A stationary cursor queues no new event.
+        if(state.menu_selection_feedback && (target==0x01202464U || target==0x025001A0U)) {
+          const auto pending=*state.menu_selection_feedback;state.menu_selection_feedback.reset();
+          const auto current=read_guest_menu(state);
+          jfg::mod::Memory menu_ram({rdram,kRdramSize});
+          const auto stack=static_cast<std::uint32_t>(context->r29);
+          if(current.ready && current.kind==pending.kind && current.identity==pending.identity &&
+             menu_ram.valid(stack-0x600U,0x600U) && menu_ram.u32(0x80001248U)==0x3C0F800FU) {
+            if(auto* sound=jfg_generated_lookup_function(static_cast<std::int32_t>(0x80001248U))) {
+              auto sound_context=*context;sound_context.r29=stack-0x40U;
+              sound_context.r4=0x16BU;sound_context.r5=0;
+              sound(rdram,&sound_context);
+              state.gameplay_trace.event("menu-hover-sound",{state.vi_retraces,static_cast<unsigned>(current.kind),0x16BU});
+            }
+          }
+        }
         ModernShoulderScope modern_shoulder(state,target,*context);
         modern_shoulder_physics(state,target,*context);
         ModernAirPhysicsScope modern_air_physics(state,target,*context);
@@ -10783,7 +10863,7 @@ int run_child(const char *path, const unsigned retrace_target,
     reload_controller_ports(state);
     state.pc_record_extended=state.modern_controls_active;
 #endif
-    state.input_record << (state.pc_record_extended?jfg::kInputReplayHeaderV7:jfg::kInputReplayHeader) << '\n';
+    state.input_record << (state.pc_record_extended?jfg::kInputReplayHeaderV8:jfg::kInputReplayHeader) << '\n';
   }
   if (!state.retrace_hash_path.empty()) {
     state.retrace_hash_trace.open(state.retrace_hash_path,

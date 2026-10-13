@@ -35,6 +35,7 @@ template <typename Value>
     const bool has_actions,
     const bool has_menu,
     const bool has_pause_menu,
+    const bool has_options,
     InputReplayEvent& output) noexcept {
     std::array<std::string_view, 12U> fields{};
     std::size_t field = 0U;
@@ -87,8 +88,8 @@ template <typename Value>
     unsigned menu_kind=0,menu_target=0;
     if(has_menu && (!parse_integer(fields[10],menu_kind) || !parse_integer(fields[11],menu_target) ||
         ((menu_kind==0)!=(menu_target==0)) ||
-        (menu_kind!=0 && (menu_kind<2 || menu_kind>(has_pause_menu?5U:4U) ||
-          menu_target>(menu_kind==2?3U:menu_kind==3?6U:menu_kind==5?9U:1U))) ||
+        (menu_kind!=0 && (((menu_kind<2 || menu_kind>(has_pause_menu?5U:4U)) && !(has_options && menu_kind==8)) ||
+          menu_target>(menu_kind==2?3U:menu_kind==3?6U:menu_kind==5?9U:menu_kind==8?8U:1U))) ||
         (!connected && menu_kind!=0)))return false;
     output.sample.menu_kind=static_cast<std::uint8_t>(menu_kind);
     output.sample.menu_target=static_cast<std::uint8_t>(menu_target);
@@ -128,7 +129,8 @@ InputReplayError DeterministicInputReplay::load(
     if (!line.empty() && line.back() == '\r') {
         line.pop_back();
     }
-    const bool has_pause_menu = line == kInputReplayHeaderV7;
+    const bool has_options = line == kInputReplayHeaderV8;
+    const bool has_pause_menu = has_options || line == kInputReplayHeaderV7;
     const bool has_menu = has_pause_menu || line == kInputReplayHeaderV6;
     const bool has_actions = has_menu || line == kInputReplayHeaderV5;
     const bool precise_stick = has_actions || line == kInputReplayHeaderV4;
@@ -146,7 +148,7 @@ InputReplayError DeterministicInputReplay::load(
             return InputReplayError::invalid_record;
         }
         InputReplayEvent event;
-        if (!parse_record(line, has_connection, has_pc, precise_stick, has_actions, has_menu, has_pause_menu, event)) {
+        if (!parse_record(line, has_connection, has_pc, precise_stick, has_actions, has_menu, has_pause_menu, has_options, event)) {
             return InputReplayError::invalid_record;
         }
         if (!parsed.empty() && event.first_retrace < parsed.back().end_retrace) {

@@ -130,15 +130,18 @@ from the browser reference. No simulated input buttons are shipped.
 | Cycle magnification | RS click | R3 | Middle mouse |
 | Increase / Decrease magnification | Unbound | Unbound | Unbound |
 | Pause | Menu | Options | Tab |
-| Menu confirm | A | Cross | Enter |
-| Menu back | B | Circle | Backspace |
-| Menu navigation | Left stick / D-pad | Left stick / D-pad | Arrows |
+| Menu select / contextual action | A | Cross | E |
+| Menu back | B | Circle | Q; right-click |
+| Menu navigation | Left stick / D-pad | Left stick / D-pad | WASD / arrows |
 | Full keyboard movement | N/A | N/A | Shift |
 
 The action layer handles Normal/Expert internally. Modern Controls does not
 expose N64 button names or require the user to select the guest control scheme.
 Move/Look are a stick-pair setting on controllers, not extra digital actions.
-Keyboard gameplay directions do not leak into explicit menu navigation.
+Keyboard movement bindings also navigate menus; explicit directional menu
+bindings take precedence on their axis. Their shared context is included in
+binding-conflict checks. E dismisses information pages and finishes character
+selection; Q and right-click provide Back.
 
 ## Aim and sniper magnification
 
@@ -154,10 +157,11 @@ aim automatically. This multiplier applies only to qualified live sniper aiming,
 not ordinary camera movement, swimming or airborne camera ownership. Fractional
 motion is retained for fine adjustment and cleared when the context changes.
 
-Jump and crouch do not double as zoom actions. The qualified original sniper
-stance still requires leaving aim before jumping or crouching; Scoped preview
-and Settings explicitly explain this restriction. Preview content is
-instructional, not a live HUD.
+Jump and crouch do not double as zoom actions. Jump can start from aim using
+the character's native airborne movement; held/toggled aim resumes on landing.
+Continuous scoped airborne ADS is not implemented. Crouching still requires
+leaving aim. Scoped preview and Settings describe this behavior; their preview
+content is instructional, not a live HUD.
 
 ## Rebinding, persistence and recovery
 

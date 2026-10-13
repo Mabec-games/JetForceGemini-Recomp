@@ -171,6 +171,18 @@ void test_modern_action_recording() {
 }
 
 void test_native_menu_recording() {
+
+  {
+    const TemporaryReplay valid("jfg-phase8-input-v8\n1,2,1,8000,0,0,0,0,0,128,8,8\n");
+    jfg::DeterministicInputReplay replay;
+    check(jfg::DeterministicInputReplay::load(valid.path(),replay)==jfg::InputReplayError::none && replay.sample_at(1).menu_kind==8,"v8 Options direct selection survives recording");
+    for(const auto *row:{"1,2,1,0,0,0,0,0,0,128,8,9","1,2,1,0,0,0,0,0,0,128,6,1","1,2,1,0,0,0,0,0,0,128,7,1","1,2,1,0,0,0,0,0,0,128,9,1"}) {
+      const TemporaryReplay bad(std::string("jfg-phase8-input-v8\n")+row+"\n");
+      check(jfg::DeterministicInputReplay::load(bad.path(),replay)==jfg::InputReplayError::invalid_record,"nonselection pages and invalid Options targets reject");
+    }
+    const TemporaryReplay old("jfg-phase8-input-v7\n1,2,1,8000,0,0,0,0,0,128,8,1\n");
+    check(jfg::DeterministicInputReplay::load(old.path(),replay)==jfg::InputReplayError::invalid_record,"v7 does not reinterpret Options events");
+  }
   {
     const TemporaryReplay validPause("jfg-phase8-input-v7\n100,101,1,0,0,0,0,0,0,128,5,7\n101,102,1,2000,0,0,0,0,0,128,5,9\n");
     jfg::DeterministicInputReplay replay;

@@ -40,11 +40,13 @@ of the game's Normal/Expert option.
 | Previous / next weapon | Wheel down / up | LB / RB; L1 / R1 |
 | Cycle sniper magnification | Middle mouse while scoped | Right-stick click while scoped |
 | Pause | Tab | Menu / Options |
-| Menu confirm / back | Enter / Backspace | A / B; Cross / Circle |
+| Menu select / back | E / Q; right-click also goes back | A / B; Cross / Circle |
 
 Increase and Decrease magnification are separate optional actions. Click an input
 to assign them or another action. Modern Jump/Crouch do not change sniper zoom.
-Leave the aim stance before jumping or crouching.
+Jump can start while Aim is held or toggled. The native airborne state temporarily
+leaves aim; aiming resumes on landing while the aim intent remains active.
+Leave the aim stance before crouching.
 
 Modern ground movement uses a view-locked third-person camera: turning the mouse
 or look stick turns the character, forward follows that heading, and left/right
@@ -77,10 +79,22 @@ pointer actions. The first click returning from another application activates th
 also issuing an input. Clicking within the already active launcher keeps the
 click when focus transfers from the launcher to its game viewport.
 
-This is **partial native-menu pointer support**. Options pages, save copy/erase,
-new-game naming, character selection, pause/inventory and dialogue still use the
-keyboard/controller menu bindings. Arrow keys, Enter and Backspace remain
-available. The launcher and controller editor continue to use RmlUi.
+Pause-menu icons and the pause Options icons support direct pointer selection
+and activation. A changed pause/Options selection plays the native selection
+sound. Character selection has clickable left/right arrows; click its central
+label or press E to accept and return.
+
+WASD (or rebound movement keys) also navigates menus. A/D adjusts native settings
+such as music volume; dedicated arrow bindings remain available. E selects at a
+menu root and closes informational pages such as Health, Weapons, Inventory,
+Tribals and Ship Parts. E also finishes Character selection and ordinary Options
+adjustment. Q and right-click are Back, including on Map; E on Map retains the
+game's travel confirmation. Held E cannot immediately close the page it opened.
+
+This remains **partial native-menu pointer support**. Nested Options settings
+use directional keys; save copy/erase, new-game naming, Options opened from the
+title/start flow, and dialogue are not a complete mouse interface. Explicitly
+rebound menu keys remain supported. The launcher and controller editor use RmlUi.
 
 ## Settings and compatibility
 
@@ -98,8 +112,9 @@ available. The launcher and controller editor continue to use RmlUi.
 - experimental-controls.ini is obsolete and ignored by the live runtime.
   Old mouse-look/dual-stick flags in pc-input.ini do not activate modern paths
   while Controller Mapping is selected. Existing files remain for rollback.
-- Recordings begun in Modern Controls use v6 with independent look/actions and
-  semantic native-menu selection events. The reader retains v1-v5 compatibility.
+- Recordings begun in Modern Controls use v8 with independent look/actions and
+  semantic native-menu selection events, including pause Options. The reader
+  retains v1-v7 compatibility.
   Recordings begun in original mode retain their older format; switching mode
   mid-recording does not consume look input that cannot be recorded.
 - XInput rumble is supported. Native SDL/DualSense rumble, gyro and adaptive
@@ -1550,3 +1565,18 @@ develop worktree and runs the generated-entry, private-root generator and native
 span regressions there. The previously recorded runtime replay and preview
 qualification remain linked in the issue records. Original workspace files,
 other pending edits and installed user profiles are preserved.
+
+
+### 2026-10-13: Pause navigation, contextual action and jumping from aim
+
+Modern keyboard movement bindings now navigate native menus, Q defaults to Back,
+and E closes informational pages or finishes character selection. Direct pause
+Options targets and Character arrows preserve native availability, transition
+gates and selection sounds. Controller Mapping opens centered over its launcher.
+
+Jumping from aim reuses each character's native jump handler and airborne state.
+Held/toggled aim returns on landing; continuous airborne ADS is not implemented.
+Native tests cover all three characters, sideways takeoff and held-button edges.
+Original Controller Mapping's reference jump replay retains byte-identical final
+RDRAM. See the [issue record](../development/issues/modern-pause-navigation.md)
+for causes, rejected attempts, verification scope and remaining owner checks.

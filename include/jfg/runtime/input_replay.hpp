@@ -7,6 +7,7 @@
 
 namespace jfg {
 
+inline constexpr char kInputReplayHeaderV8[] = "jfg-phase8-input-v8";
 inline constexpr char kInputReplayHeaderV7[] = "jfg-phase8-input-v7";
 inline constexpr char kInputReplayHeaderV6[] = "jfg-phase8-input-v6";
 inline constexpr char kInputReplayHeaderV5[] = "jfg-phase8-input-v5";

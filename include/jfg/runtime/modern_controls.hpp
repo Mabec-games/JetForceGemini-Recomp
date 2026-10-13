@@ -22,8 +22,8 @@ inline constexpr std::array<ModernActionInfo,kModernActionCount> kModernActions{
     {"weapon_next","Next weapon",3}, {"scope_cycle","Cycle magnification",2},
     {"scope_increase","Increase magnification",2}, {"scope_decrease","Decrease magnification",2},
     {"pause","Pause",7}, {"menu_confirm","Confirm",4}, {"menu_back","Back",4},
-    {"move_forward","Move forward",3,false}, {"move_back","Move back",3,false},
-    {"move_left","Move left",3,false}, {"move_right","Move right",3,false},
+    {"move_forward","Move forward",7,false}, {"move_back","Move back",7,false},
+    {"move_left","Move left",7,false}, {"move_right","Move right",7,false},
     {"move_fast","Full movement",3,false}, {"menu_up","Menu up",4},
     {"menu_down","Menu down",4}, {"menu_left","Menu left",4}, {"menu_right","Menu right",4}, {"menu_save","Save game",4}
 }};
@@ -50,7 +50,7 @@ struct ModernControlsConfig {
         23,25,0,1,2,9,10,8,-1,-1,6,0,1,-1,-1,-1,-1,-1,11,12,13,14,2};
     // Windows virtual keys plus portable wheel IDs. Zero is unbound.
     std::array<int,kModernActionCount> keys{
-        2,1,32,17,'E',kPcWheelDown,kPcWheelUp,4,0,0,9,'E',8,
+        2,1,32,17,'E',kPcWheelDown,kPcWheelUp,4,0,0,9,'E','Q',
         'W','S','A','D',16,38,40,37,39,0x74};
     PcInputConfig look = [] {
         PcInputConfig c;c.modern=c.mouse_aim=c.dual_stick=1;c.mouse_invert_y=1;return c;
@@ -61,7 +61,7 @@ inline constexpr std::array<std::string_view,11> kModernSettings{
     "movement_deadzone","axis_threshold","trigger_threshold","mouse_scope_sensitivity","pad_scope_sensitivity","mouse_original_acceleration"};
 inline std::string serialize_modern_controls(const ModernControlsConfig &c) {
     std::string out;
-    const std::array<int,kModernSettings.size()> values{4,int(c.enabled),int(c.aim_toggle),int(c.glyph_style),
+    const std::array<int,kModernSettings.size()> values{5,int(c.enabled),int(c.aim_toggle),int(c.glyph_style),
         c.movement_stick,c.movement_deadzone,c.axis_threshold,c.trigger_threshold,
         c.mouse_scope_sensitivity,c.pad_scope_sensitivity,int(c.mouse_original_acceleration)};
     for(std::size_t i=0;i<values.size();++i)
@@ -131,12 +131,20 @@ inline bool parse_modern_controls(std::string_view text,ModernControlsConfig &re
         seen[padSlot]=seen[keySlot]=true;
     }
     for(bool present:seen)if(!present)return false;
-    if((values[0]!=1 && values[0]!=2 && values[0]!=3 && values[0]!=4) || values[1]<0 || values[1]>1 || values[2]<0 || values[2]>1 ||
+    if((values[0]!=1 && values[0]!=2 && values[0]!=3 && values[0]!=4 && values[0]!=5) || values[1]<0 || values[1]>1 || values[2]<0 || values[2]>1 ||
        values[3]<0 || values[3]>2 || values[4]<0 || values[4]>1 ||
        values[5]<0 || values[5]>30000 || values[6]<1000 || values[6]>32000 ||
        values[7]<1000 || values[7]>32000 || values[8]<10 || values[8]>300 ||
        values[9]<10 || values[9]>300 || values[10]<0 || values[10]>1 || !parse_pc_input(look,c.look) ||
        c.look.modern!=1 || c.look.mouse_aim!=1 || c.look.dual_stick!=1)return false;
+    // Only migrate the old default Back binding; preserve custom controls and
+    // avoid taking Q from a menu or movement action. New profiles expose Q in UI.
+    if(values[0]<5 && c.keys[static_cast<std::size_t>(ModernAction::menu_back)]==8) {
+        bool available=true;
+        for(std::size_t i=0;i<kModernActionCount;++i)
+            if((kModernActions[i].contexts&kModernMenus) && c.keys[i]=='Q')available=false;
+        if(available)c.keys[static_cast<std::size_t>(ModernAction::menu_back)]='Q';
+    }
     c.enabled=values[1]!=0;c.aim_toggle=values[2]!=0;
     c.glyph_style=static_cast<ModernGlyphStyle>(values[3]);c.movement_stick=values[4];
     c.movement_deadzone=values[5];c.axis_threshold=values[6];c.trigger_threshold=values[7];
@@ -284,7 +292,9 @@ inline ControllerPortSample map_modern_actions(const ModernActionSample &input,b
     const auto held=[&](ModernAction a){return (input.held&modern_bit(a))!=0;};
     if(held(ModernAction::pause))out.buttons|=0x1000;
     if(menu) {
-        if(!input.gamepad)out.x=out.y=0;
+        // Movement bindings also navigate menus. Explicit menu bindings (arrow
+        // keys by default) remain available and take precedence on their axis.
+        // This respects remapped movement keys without hard-coding WASD.
         if(held(ModernAction::menu_confirm))out.buttons|=0x8000;
         if(can_save && held(ModernAction::menu_save))out.buttons|=0x2000;
         if(held(ModernAction::menu_back))out.buttons|=0x4000;

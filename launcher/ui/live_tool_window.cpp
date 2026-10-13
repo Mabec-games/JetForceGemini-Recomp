@@ -142,22 +142,28 @@ int FrontendLiveToolEntry(HINSTANCE instance, int show) {
   cls.hCursor = LoadCursorW(nullptr, IDC_ARROW);
   cls.hbrBackground = CreateSolidBrush(RGB(11, 15, 23));
   RegisterClassW(&cls);
-  int density = static_cast<int>(GetDpiForSystem());
+  int density = static_cast<int>(IsWindow(live.owner) ? GetDpiForWindow(live.owner) : GetDpiForSystem());
   RECT size{0, 0, MulDiv(live.kind == "map" ? 1200 : live.kind == "controllers" ? 1280 : 486, density, 96),
             MulDiv(live.kind == "map" ? 740 : live.kind == "controllers" ? 920 : 716, density, 96)};
   AdjustWindowRectExForDpi(&size, WS_OVERLAPPEDWINDOW, FALSE, 0, density);
+  int initialX=CW_USEDEFAULT,initialY=CW_USEDEFAULT;
   if(live.kind=="controllers") {
     MONITORINFO monitor{sizeof(MONITORINFO)};
     if(GetMonitorInfoW(MonitorFromWindow(live.owner,MONITOR_DEFAULTTONEAREST),&monitor)) {
       const auto& work=monitor.rcWork;
       size.right=size.left+std::min<LONG>(size.right-size.left,work.right-work.left-32);
       size.bottom=size.top+std::min<LONG>(size.bottom-size.top,work.bottom-work.top-48);
+      RECT anchor=work;
+      if(IsWindow(live.owner) && !IsIconic(live.owner))GetWindowRect(live.owner,&anchor);
+      const LONG width=size.right-size.left,height=size.bottom-size.top;
+      initialX=std::clamp<LONG>(anchor.left+(anchor.right-anchor.left-width)/2,work.left,work.right-width);
+      initialY=std::clamp<LONG>(anchor.top+(anchor.bottom-anchor.top-height)/2,work.top,work.bottom-height);
     }
   }
   live.window = CreateWindowExW(
       0, cls.lpszClassName,
       live.kind == "map" ? L"JFG Live Map" : live.kind == "controllers" ? L"JFG Controller Mapping" : L"JFG Live Inventory",
-      WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, size.right - size.left,
+      WS_OVERLAPPEDWINDOW, initialX, initialY, size.right - size.left,
       size.bottom - size.top, live.kind=="controllers"?live.owner:nullptr, nullptr, instance, nullptr);
   if (!live.window)
     return 3;
