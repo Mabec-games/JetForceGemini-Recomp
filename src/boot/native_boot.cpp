@@ -1765,6 +1765,7 @@ struct State : JfgOriginalTimingFast {
   std::uint32_t vi_mode_control = 0U;
   void *native_window = nullptr;
   jfg::ViPresentationSize window_presentation{320U, 240U};
+  bool window_widescreen=false;
   std::unique_ptr<jfg::Rt64Shell> rt64_shell;
   std::vector<std::byte> rt64_rdram;
   std::uint32_t graphics_color_image = 0U;
@@ -2011,6 +2012,12 @@ private:
     if (message == WM_CLOSE) { self->input_.close(); return 0; }
     if (message == kStopMessage) { PostQuitMessage(0); return 0; }
     if (message == kAspectMessage) {
+      if(wparam==320U && (lparam==180 || lparam==240)) {
+        SetPropW(window,L"JfgGameAspectWidth",reinterpret_cast<HANDLE>(wparam));
+        SetPropW(window,L"JfgGameAspectHeight",reinterpret_cast<HANDLE>(lparam));
+        if(GetParent(window))
+          PostMessageW(GetAncestor(window,GA_ROOT),WM_APP+24,reinterpret_cast<WPARAM>(window),0);
+      }
       RECT client{};
       if (!GetParent(window) && wparam != 0U && lparam > 0 && !IsZoomed(window) && !IsIconic(window) &&
           GetClientRect(window,&client) && client.bottom > client.top) {
@@ -2206,6 +2213,77 @@ bool modern_shoulder_current(const State &state,std::size_t port,std::uint32_t a
   return port<4 && state.pc_shoulder_actor==actor && state.pc_shoulders[port].active &&
     state.pc_shoulders[port].actor==actor && jfg::mod::pc_gameplay_active(ram,actor);
 }
+int dispatch(void *opaque,std::int32_t address,std::uint8_t *rdram,recomp_context *context);
+bool modern_air_aim_active(const State &state,std::uint32_t actor,std::uint32_t control) {
+  jfg::mod::Memory ram({state.rdram,kRdramSize});
+  if(!ram.valid(actor,0xA4U) || !ram.valid(control,0x5D0U) || ram.u32(actor+0x68U)!=control)return false;
+  const auto port=ram.u8(control);
+  return port==0U && state.modern_controls_active && state.pc_shoulders[port].active &&
+    state.pc_shoulders[port].actor==actor && state.pc_shoulders[port].control==control &&
+    (state.pc_frames[port].modern_flags&jfg::kModernActionsFlag) &&
+    (state.pc_frames[port].pc_mode==3 || state.pc_frames[port].pc_mode==5) &&
+    state.controller_ports.samples[port].connected && !state.pc_input_blocked &&
+    jfg::mod::pc_gameplay_active(ram,actor) && !ram.u8(0x800FD7BDU) &&
+    !jfg::mod::scripted_camera_active(ram,actor) &&
+    jfg::pc_air_aim((ram.u32(0x800F6DA0U)&0x10U)!=0,ram.u8(control+0x568U),state.pc_shoulders[port].air_aim);
+}
+void modern_air_aim_update(State &state,std::uint32_t actor,std::uint32_t control,
+                           const recomp_context &context) {
+  if(!modern_air_aim_active(state,actor,control))return;
+  jfg::mod::Memory ram({state.rdram,kRdramSize});
+  const auto stack=static_cast<std::uint32_t>(context.r29)-0x40U;
+  if(!ram.valid(stack-0x600U,0x640U) || ram.u32(0x8003AABCU)!=0x27BDFFA8U)return;
+  const auto port=ram.u8(control);auto &view=state.pc_shoulders[port];
+  // Invoke only the shared native aiming/zoom update, never its grounded
+  // locomotion handler. Its scratch frame lives below the suspended caller.
+  hle::GuestMemory memory({state.rdram,kRdramSize},hle::GuestMemory::Layout::native_word_big_endian);
+  auto aim=context;aim.r29=static_cast<std::int32_t>(stack);aim.r4=static_cast<std::int32_t>(actor);aim.r5=static_cast<std::int32_t>(control);aim.r6=aim.r7=0xE38;
+  (void)memory.write_u32(stack+0x10U,static_cast<std::uint32_t>(-10922));
+  (void)memory.write_u32(stack+0x14U,10922U);
+  (void)memory.write_u32(stack+0x18U,stack+0x30U);(void)memory.write_u32(stack+0x1CU,stack+0x32U);
+  (void)memory.write_u32(stack+0x20U,static_cast<std::uint32_t>(context.r6));
+  const auto heading=ram.u16(control+0x11CU);
+  ram.put16(control+0x11CU,static_cast<std::uint16_t>(view.yaw));
+  ram.put16(control+0x1E2U,static_cast<std::uint16_t>(-view.pitch));
+  dispatch(&state,static_cast<std::int32_t>(0x8003AABCU),state.rdram,&aim);
+  ram.put16(control+0x11CU,heading); // Air steering retains its momentum heading.
+  // Native grounded aim publishes these weapon directions after shared look.
+  // Airborne animation remains the jump clip; its weapon uses the same view.
+  for(auto offset:{0x1C6U,0x1CAU})ram.put16(control+offset,static_cast<std::uint16_t>(view.yaw));
+  for(auto offset:{0x1C8U,0x1CCU,0x1D0U,0x1DEU})ram.put16(control+offset,static_cast<std::uint16_t>(-view.pitch));
+  ram.put16(control+0x1CEU,0);ram.put16(control+0x1DCU,0);ram.put16(control+0x1E0U,0);
+  if(aim.r2) {
+    auto zoom=context;zoom.r29=static_cast<std::int32_t>(stack);zoom.r4=port;zoom.r5=ram.u32(control+0x1ECU);
+    dispatch(&state,static_cast<std::int32_t>(0x80042438U),state.rdram,&zoom);
+  }
+  view.air_aim=view.aiming=true;
+  state.gameplay_trace.event("pc-air-aim",{state.vi_retraces,actor,ram.u8(control+0x568U),
+    ram.u16(control+0x11CU),static_cast<std::uint16_t>(view.yaw),ram.u16(control+0x1E2U)});
+}
+// The stock camera, weapon, reticle and fade APIs encode Aim in the locomotion byte.
+// Adapt that legacy parameter only for those calls. Gravity, collisions,
+// airborne animation and landing always see the real locomotion state.
+class ModernAirAimPresentationScope {
+  State &state_;std::uint32_t control_=0;std::uint16_t movement_=0,heading_=0;
+public:
+  ModernAirAimPresentationScope(State &state,std::uint32_t target,const recomp_context &context):state_(state) {
+    if(target!=0x8002B418U && target!=0x80037550U && target!=0x80033BB8U && target!=0x00E00B30U)return;
+    jfg::mod::Memory ram({state.rdram,kRdramSize});
+    const auto actor=target==0x80033BB8U?state.pc_shoulder_actor:static_cast<std::uint32_t>(context.r4);
+    const auto control=target==0x00E00B30U?(ram.valid(actor,0xA4U)?ram.u32(actor+0x68U):0U):
+      static_cast<std::uint32_t>(target==0x80033BB8U?context.r4:context.r5);
+    if(!modern_air_aim_active(state,actor,control))return;
+    const auto port=ram.u8(control);control_=control;movement_=ram.u16(control+0x568U);heading_=ram.u16(control+0x11CU);
+    ram.put16(control+0x568U,static_cast<std::uint16_t>(0xB00U|(movement_&0xFFU)));
+    ram.put16(control+0x11CU,static_cast<std::uint16_t>(state.pc_shoulders[port].yaw));
+    state.gameplay_trace.event("pc-air-aim-consumer",{state.vi_retraces,actor,target,static_cast<unsigned>(movement_>>8U)});
+  }
+  ~ModernAirAimPresentationScope() {
+    if(!control_)return;
+    jfg::mod::Memory ram({state_.rdram,kRdramSize});
+    ram.put16(control_+0x568U,movement_);ram.put16(control_+0x11CU,heading_);
+  }
+};
 class ModernShoulderScope {
   State &state_;
   std::uint32_t actor_=0,control_=0,update_ticks_=0;
@@ -2232,7 +2310,13 @@ public:
        ram.u32(target)!=0x27BDFF70U || ram.u32(target+4U)!=0xAFBF002CU) {view={};return;}
     actor_=actor;control_=control;port_=port;state.pc_shoulder_actor=actor;
     update_ticks_=static_cast<std::uint32_t>(context.r5);
-    const bool aiming=movement==10U || movement==11U;
+    // The native landing-to-aim transition clears its pitch field. Retain
+    // the airborne view when it reaches grounded aim on the following update.
+    if(view.air_aim && (movement==10U || movement==11U) &&
+       (ram.u32(0x800F6DA0U)&0x10U)!=0 && !state.pc_input_blocked)
+      ram.put16(control+0x1E2U,static_cast<std::uint16_t>(-view.pitch));
+    view.air_aim=jfg::pc_air_aim((ram.u32(0x800F6DA0U)&0x10U)!=0,movement,view.air_aim) && !state.pc_input_blocked;
+    const bool aiming=movement==10U || movement==11U || view.air_aim;
     const auto camera=ram.u32(0x800F6DC0U);
     const int native_pitch=aiming?-ram.s16(control+0x1E2U):
       ram.valid(camera,0x4CU)?ram.s16(camera+2U):0;
@@ -2298,8 +2382,10 @@ void modern_shoulder_physics(State &state,std::uint32_t target,const recomp_cont
   const auto movement=ram.u8(control+0x568U);
   if(!jfg::pc_shoulder_state(movement) || (animation && movement!=0U))return;
   auto &view=state.pc_shoulders[port];
-  const bool aiming=movement==10U || movement==11U;
-  if(aiming && !view.aiming) {
+  const bool landing_aim=view.air_aim && (movement==10U || movement==11U);
+  view.air_aim=jfg::pc_air_aim((ram.u32(0x800F6DA0U)&0x10U)!=0,movement,view.air_aim) && !state.pc_input_blocked;
+  const bool aiming=movement==10U || movement==11U || view.air_aim;
+  if(aiming && (!view.aiming || landing_aim)) {
     // The stock run-to-aim transition clears pitch and copies the old body
     // orientation into the weapon camera. Seed it from the persistent view.
     for(auto offset:{0x1E2U,0x1D0U,0x1DEU,0x1C8U,0x1CCU})
@@ -2322,6 +2408,7 @@ void modern_shoulder_physics(State &state,std::uint32_t target,const recomp_cont
         static_cast<std::uint16_t>(momentum.yaw),std::bit_cast<std::uint32_t>(momentum.forward)});
       view.movement_before_state=3U;
     }
+    modern_air_aim_update(state,actor,control,context);
     return;
   }
   ram.put16(actor,static_cast<std::uint16_t>(view.yaw));
@@ -2953,9 +3040,14 @@ void sample_live_controller(State &state) noexcept {
   const bool pointer_probe=state.menu_pointer_replay.active() && state.input_replay_loaded && !state.play_mode;
   auto pointer=pointer_probe?state.menu_pointer_replay.sample(state.vi_retraces):state.menu_pointer_frame;
   if(pointer.left_press||pointer.right_press){pointer.x=pointer.press_x;pointer.y=pointer.press_y;}
+  // v1 fixtures store logical menu coordinates; v2 stores actual client
+  // pixels and exercises the same displayed-VI conversion as a live mouse.
+  const bool logical_probe=pointer_probe && !state.menu_pointer_replay.pixel_coordinates();
+  const auto pointer_presentation=pointer_probe?
+    jfg::vi_presentation_size(state.vi_mode_horizontal_start,state.rt64_vi.vertical_start):state.window_presentation;
   const auto point=jfg::menu_pointer_point(pointer,
-    pointer_probe?4U:(state.window_presentation.valid()?state.window_presentation.width:4U),
-    pointer_probe?3U:(state.window_presentation.valid()?state.window_presentation.height:3U));
+    logical_probe?4U:(pointer_presentation.valid()?pointer_presentation.width:4U),
+    logical_probe?3U:(pointer_presentation.valid()?pointer_presentation.height:3U));
   const bool pointer_allowed=pointer_probe || (!state.input_replay_loaded && !block_physical &&
     modern_controls_selected(state,0) && state.pc_devices[0]==-3 && connected);
   const auto pointer_packet=state.menu_pointer.sample(state.guest_menu,point,pointer.moved,
@@ -3045,7 +3137,8 @@ void sample_live_controller(State &state) noexcept {
       auto &frame=state.pc_frames[p];const auto &config=state.modern_controls[p];
       const int sensitivity=frame.pc_mode==3?config.mouse_scope_sensitivity:config.pad_scope_sensitivity;
       const auto look=state.modern_scope_sensitivity[p].take({frame.look_x,frame.look_y},
-        scoped && jfg::modern_scope_sensitivity_active(true,pc_memory.u8(control+0x568U)) &&
+        scoped && (jfg::modern_scope_sensitivity_active(true,pc_memory.u8(control+0x568U)) ||
+          jfg::pc_air_aim(true,pc_memory.u8(control+0x568U),state.pc_shoulders[p].air_aim)) &&
         (frame.pc_mode==3 || frame.pc_mode==5),sensitivity,
         (std::uint64_t{actor}<<8U)|frame.pc_mode);
       frame.look_x=static_cast<std::int16_t>(look.x);frame.look_y=static_cast<std::int16_t>(look.y);
@@ -3183,12 +3276,18 @@ void service_live_window(State &state) {
   state.host_frame_start_initialized = true;
   const auto presentation = jfg::vi_presentation_size(
       state.vi_mode_horizontal_start, state.rt64_vi.vertical_start);
-  if (state.native_window != nullptr && presentation.valid() &&
-      presentation.width * state.window_presentation.height !=
-          state.window_presentation.width * presentation.height) {
-    state.window_presentation = presentation;
+  // Pointer coordinates follow the actual displayed VI, including widescreen.
+  // The launcher canvas follows the selected video mode instead: a temporary
+  // cinematic crop must not resize the canvas and zoom away its black bars.
+  if(presentation.valid())state.window_presentation=presentation;
+  jfg::mod::Memory video_memory({state.rdram,kRdramSize});
+  const auto resolution=video_memory.u8(0x800FECA8U);
+  const bool widescreen=resolution<12U && (resolution&1U)!=0;
+  if(state.native_window && widescreen!=state.window_widescreen) {
+    state.window_widescreen=widescreen;
     PostMessageW(static_cast<HWND>(state.native_window),LiveRt64Window::kAspectMessage,
-        presentation.width,static_cast<LPARAM>(presentation.height));
+      320U,widescreen?180:240);
+    state.gameplay_trace.event("display-canvas",{state.vi_retraces,320U,widescreen?180U:240U});
   }
   const auto frontend = state.native_window ? GetAncestor(static_cast<HWND>(state.native_window), GA_ROOT) : nullptr;
   bool frontend_paused = false;
@@ -6769,6 +6868,18 @@ int dispatch(void *opaque, std::int32_t address, std::uint8_t *rdram,
       }
     }
   }
+  if(target==0x80039FCCU && modern_air_aim_active(state,static_cast<std::uint32_t>(context->r4),static_cast<std::uint32_t>(context->r5))) {
+    jfg::mod::Memory ram({rdram,kRdramSize});
+    const auto control=static_cast<std::uint32_t>(context->r5);
+    // Match the character dispatcher's aimed targeting policy: keep recoil
+    // countdown, but do not replace the player's aim with a hip-fire target.
+    const int ticks=static_cast<int>(ram.u32(static_cast<std::uint32_t>(context->r29)+0x1CU));
+    const auto counter=ram.u8(control+0x1F8U);
+    if(ram.u8(control+0x1F4U))
+      ram.put16(control+0x1F8U,static_cast<std::uint16_t>((std::max(0,int(counter)-ticks)<<8U)|ram.u8(control+0x1F9U)));
+    ram.put16(control+0x1F4U,static_cast<std::uint16_t>(0x100U|ram.u8(control+0x1F5U)));
+    return 1;
+  }
   // Modern Jump is a locomotion action even while Aim is held. Reuse the
   // character's complete native ground jump handler (animation, collision
   // eligibility, takeoff and weapon logic); never synthesize vertical velocity.
@@ -7352,6 +7463,7 @@ int dispatch(void *opaque, std::int32_t address, std::uint8_t *rdram,
         ModernShoulderScope modern_shoulder(state,target,*context);
         modern_shoulder_physics(state,target,*context);
         ModernAirPhysicsScope modern_air_physics(state,target,*context);
+        ModernAirAimPresentationScope modern_air_aim(state,target,*context);
         ModernAnimationScope modern_animation(state,target,*context);
         ModernGuestTableScope modern_table(state,target,static_cast<std::uint32_t>(context->r4));
 #endif

@@ -44,8 +44,9 @@ of the game's Normal/Expert option.
 
 Increase and Decrease magnification are separate optional actions. Click an input
 to assign them or another action. Modern Jump/Crouch do not change sniper zoom.
-Jump can start while Aim is held or toggled. The native airborne state temporarily
-leaves aim; aiming resumes on landing while the aim intent remains active.
+Jump can start while Aim is held or toggled. Aiming, the reticle and sniper
+magnification remain active through takeoff, air time and landing. Release Aim
+to leave the aiming camera in midair. Native jump motion and air steering remain active.
 Leave the aim stance before crouching.
 
 Modern ground movement uses a view-locked third-person camera: turning the mouse
@@ -1575,8 +1576,25 @@ Options targets and Character arrows preserve native availability, transition
 gates and selection sounds. Controller Mapping opens centered over its launcher.
 
 Jumping from aim reuses each character's native jump handler and airborne state.
-Held/toggled aim returns on landing; continuous airborne ADS is not implemented.
+That first delivery resumed aim on landing; the follow-up below adds continuous
+airborne ADS.
 Native tests cover all three characters, sideways takeoff and held-button edges.
 Original Controller Mapping's reference jump replay retains byte-identical final
 RDRAM. See the [issue record](../development/issues/modern-pause-navigation.md)
 for causes, rejected attempts, verification scope and remaining owner checks.
+
+
+### 2026-10-13: Widescreen viewport and continuous airborne aim
+
+The launcher render area now follows the original selected 4:3 or 16:9 display
+mode, in windowed and fullscreen layouts. Transient cinematic VI cropping does
+not resize that area. Mouse coordinates continue to follow the actual displayed
+VI; pixel-coordinate replay fixtures now exercise wide and resized menu targets.
+
+Modern aim is independent of airborne locomotion. The shared native aim/zoom
+routine supplies look, while scoped adapters let camera, weapon, reticle and
+fade consumers observe aiming. The original air state still owns gravity,
+collision, momentum, steering, animation and landing. Continuing aim also retains
+pitch through the native landing-to-aim transition. Original Controller Mapping
+keeps the original restrictions. See the [issue record](../development/issues/widescreen-pointer-and-airborne-aim.md)
+for test results and remaining live verification.

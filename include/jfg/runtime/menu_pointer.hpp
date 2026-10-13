@@ -127,34 +127,41 @@ public:
 // Diagnostic pointer scripts are consumed only by bounded, noninteractive
 // controller replays. They never send host input or run during live play.
 class MenuPointerReplay {
-  struct Event { std::uint64_t retrace; int x,y,buttons; };
+  struct Event { std::uint64_t retrace; int x,y,buttons; int width=320,height=240; };
   std::vector<Event> events_;
   std::size_t next_{};
   MenuPointerFrame current_{};
+  bool pixels_=false;
 public:
   bool load(std::istream& in) {
     std::string line;
-    if (!std::getline(in,line) || line!="jfg-menu-pointer-v1") return false;
+    if (!std::getline(in,line))return false;
+    if(!line.empty() && line.back()=='\r')line.pop_back();
+    const bool pixels=line=="jfg-menu-pointer-v2";
+    if(!pixels && line!="jfg-menu-pointer-v1")return false;
     std::vector<Event> parsed;
     while (std::getline(in,line)) {
       if (!line.empty() && line.back()=='\r') line.pop_back();
       if (line.empty() || line.size()>100 || parsed.size()>=1024) return false;
       std::replace(line.begin(),line.end(),',',' ');
       std::istringstream row(line); Event e{};std::string extra;
-      if (!(row>>e.retrace>>e.x>>e.y>>e.buttons) || (row>>extra) ||
-          e.retrace>1000000 || e.x< -320 || e.x>640 || e.y< -240 || e.y>480 ||
+      if (!(row>>e.retrace>>e.x>>e.y>>e.buttons) ||
+          (pixels && !(row>>e.width>>e.height)) || (row>>extra) ||
+          e.width<1 || e.width>16384 || e.height<1 || e.height>16384 ||
+          e.retrace>1000000 || e.x< -e.width || e.x>2*e.width || e.y< -e.height || e.y>2*e.height ||
           e.buttons<0 || e.buttons>3 || (!parsed.empty()&&e.retrace<=parsed.back().retrace)) return false;
       parsed.push_back(e);
     }
     if (parsed.empty() || !in.eof()) return false;
-    events_=std::move(parsed);next_=0;current_={};return true;
+    events_=std::move(parsed);next_=0;current_={};pixels_=pixels;return true;
   }
   bool active() const { return !events_.empty(); }
+  bool pixel_coordinates() const { return pixels_; }
   MenuPointerFrame sample(std::uint64_t retrace) {
     current_.moved=current_.left_press=current_.right_press=false;
     if(next_<events_.size()&&events_[next_].retrace<=retrace) {
       const auto e=events_[next_++];
-      current_={e.x,e.y,320,240,true,true,(e.buttons&1)!=0,(e.buttons&2)!=0,e.x,e.y};
+      current_={e.x,e.y,e.width,e.height,true,true,(e.buttons&1)!=0,(e.buttons&2)!=0,e.x,e.y};
     }
     return current_;
   }

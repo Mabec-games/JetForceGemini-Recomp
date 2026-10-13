@@ -407,7 +407,7 @@ struct PcShoulder {
   PcMoveVelocity movement_before_update{};
   unsigned movement_before_state=0;
   int movement_before_yaw=0;
-  bool active=false,aiming=false;
+  bool active=false,aiming=false,air_aim=false;
   std::uint32_t actor=0,control=0;
   std::uint64_t retrace=0;
   int yaw=0,pitch=0;
@@ -418,6 +418,11 @@ struct PcShoulder {
     return true;
   }
 };
+// Modern Aim is independent of native jump locomotion. The landing update
+// may briefly be state 0 before its ground handler re-enters native aim.
+inline bool pc_air_aim(bool held,unsigned movement,bool continuing=false) {
+  return held && (movement==3U || (movement==0U && continuing));
+}
 struct PcOrbit {
   bool active=false;
   std::uint32_t actor=0;

@@ -21,6 +21,23 @@ int main(){
   check(p.valid&&p.x==160&&p.y>119&&p.y<121,"125 percent DPI scaling");
   check(!menu_pointer_point(f,0,3).valid,"invalid aspect");
   f.width=0;check(!menu_pointer_point(f,4,3).valid,"minimized viewport");
+  GuestMenuState wideOptions{GuestMenuKind::options,0,255,true,789,8};
+  // Actual window pixels -> displayed VI -> logical menu coordinates. Include
+  // nested letterboxing from the regression, ultrawide bars and odd DPI sizes.
+  for (const auto size : {std::array<int,2>{1920,1080}, {1440,1080},
+                          {3440,1440}, {1399,787}, {2000,1125}}) {
+    const double scale=std::min(double(size[0])/320,double(size[1])/180);
+    const double left=(size[0]-320*scale)*.5,top=(size[1]-180*scale)*.5;
+    for(int i=0;i<8;++i) {
+      const double x=(i&1)?234:86,y=70+34*(i/2);
+      MenuPointerFrame window{int(left+x*scale),int(top+y*.75*scale),
+                              size[0],size[1],true};
+      check(menu_pointer_target(wideOptions,menu_pointer_point(window,320,180))==i,
+            "widescreen Options hover matches displayed icon after resize/DPI");
+    }
+  }
+  f={960,10,1920,1200,true};
+  check(!menu_pointer_point(f,320,180).valid,"widescreen top bar rejects clicks");
   GuestMenuState start{GuestMenuKind::start,0,5,true,42};
   check(menu_pointer_target(start,{88,190,true})==0,"Play icon");
   check(menu_pointer_target(start,{160,190,true})==-1,"disabled Multi has no target");
@@ -172,5 +189,14 @@ int main(){
   check(!replay.sample(11).left_press,"fixture does not hold click");
   std::istringstream invalid("jfg-menu-pointer-v1\n10,80,90,1\n9,80,90,1\n");
   check(!replay.load(invalid),"out of order fixture rejected");
+  std::istringstream pixels("jfg-menu-pointer-v2\n10,516,315,1,1920,1080\n20,731,432,0,1000,800\n");
+  check(replay.load(pixels)&&replay.pixel_coordinates(),"pixel fixture loads with viewport");
+  auto pixel=replay.sample(10);
+  check(pixel.width==1920&&pixel.height==1080&&pixel.left_press,"pixel fixture retains client extent");
+  check(menu_pointer_target(wideOptions,menu_pointer_point(pixel,320,180))==0,"pixel fixture reaches displayed widescreen icon");
+  pixel=replay.sample(20);
+  check(pixel.width==1000&&pixel.height==800,"pixel fixture supports window resize");
+  std::istringstream badSize("jfg-menu-pointer-v2\n10,516,315,1,0,1080\n");
+  check(!replay.load(badSize),"pixel fixture rejects minimized extent");
   std::cout<<checks<<" menu pointer checks passed\n";
 }

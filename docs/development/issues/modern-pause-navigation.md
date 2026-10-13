@@ -200,3 +200,5 @@ profile remains unchanged by that test.
 Runtime SHA-256: e20a0258c493eed0867e19733ef046704f5acd42dbc352ea490a567f79fcf24b
 
 Launcher SHA-256: a73f93ad865e354cf876adad1b34797aa247cb8ab3e06b4ccb4bbe0df2f4d52c
+
+Follow-up: [continuous airborne aim and widescreen presentation](widescreen-pointer-and-airborne-aim.md) supersedes the initial airborne ADS limitation. Its distinct test and live-verification status is recorded there.

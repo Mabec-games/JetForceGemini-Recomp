@@ -456,6 +456,12 @@ int main() {
   check(jfg::pc_camera_box_possible({0,0,0},{0,0,20},{-1,-1,9},{1,1,11}),"moving model bounds retain possible body contact");
   check(!jfg::pc_camera_box_possible({0,0,0},{0,0,20},{30,-1,9},{40,1,11}),"distant moving model does not require a query");
   check(jfg::pc_camera_box_possible({0,0,0},{0,0,20},{2,2,2},{1,1,1}),"invalid model bounds fall back to guest query");
+  check(jfg::pc_air_aim(true,3),"modern Aim can coexist with airborne locomotion");
+  check(!jfg::pc_air_aim(false,3,true),"releasing Aim in flight clears aim ownership");
+  check(jfg::pc_air_aim(true,0,true),"landing keeps Aim through native ground transition");
+  check(!jfg::pc_air_aim(true,0),"normal ground entry remains native");
+  for(unsigned m:{1U,2U,4U,5U,6U,8U,10U,11U,32U})
+    check(!jfg::pc_air_aim(true,m,true),"air aim never overrides unrelated native states");
   check(jfg::pc_normal_camera_owns_look(false,0),"normal camera owns unheld ground look");
   check(jfg::pc_normal_camera_owns_look(true,3),"airborne normal camera keeps look with aim held");
   check(jfg::pc_normal_camera_owns_look(true,4),"swimming normal camera keeps look with aim held");

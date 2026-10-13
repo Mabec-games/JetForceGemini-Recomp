@@ -233,7 +233,7 @@
       escape(key(jfg::ModernAction::weapon_previous))+" and "+escape(key(jfg::ModernAction::weapon_next))+" switch weapons.":
       instruction(jfg::ModernAction::weapon_previous,"select the previous weapon")+" "+instruction(jfg::ModernAction::weapon_next,"select the next weapon"))+"</p>";
     html+="<p>"+(bound(jfg::ModernAction::pause)?escape(key(jfg::ModernAction::pause))+" pauses the game.":instruction(jfg::ModernAction::pause,"pause the game"))+"</p>";
-    if(modernContext==jfg::kModernScoped)html+="<p class=\"mc-hint\">Jump while aiming; aim resumes on landing. Leave aim before crouching.</p>";
+    if(modernContext==jfg::kModernScoped)html+="<p class=\"mc-hint\">Jump keeps your aim and sights active. Leave aim before crouching.</p>";
     html+="<div class=\"mc-how-menus\">In menus, "+escape(key(jfg::ModernAction::menu_confirm))+" selects or closes an information page and "+escape(key(jfg::ModernAction::menu_back))+" goes back. Save from the pause menu with "+escape(key(jfg::ModernAction::menu_save))+". "+std::string(pcKeyboard()?"Movement keys also navigate menus; right-click goes back. ":"")+"Menu inputs can share with gameplay.</div></section>";
     return html;
   }
@@ -329,7 +329,7 @@
     html+=modernSwitch("mc-invert-y","Invert vertical",keyboard?"Move the mouse up to look down":"Push up to look down",keyboard?look.mouse_invert_y:look.aim_invert_y);
     const std::string camera=html+"</section>";html="<section id=\"mc-scope-card\" class=\"mc-settings-card\"><div class=\"mc-section-title\">AIM &amp; SCOPE</div><div class=\"mc-setting\"><strong>Aim behavior</strong><div class=\"mc-segment\">"+
       modernButton("mc-aim-hold","Hold to aim",!c.aim_toggle)+modernButton("mc-aim-toggle","Toggle aim",c.aim_toggle)+"</div><div class=\"mc-hint\">"+
-      std::string(c.aim_toggle?"Press ":"Hold ")+escape(modernInputName((keyboard?c.keys:c.pad)[0]))+" to aim. Jump while aiming; aim resumes on landing. Leave aim before crouching.</div></div>";
+      std::string(c.aim_toggle?"Press ":"Hold ")+escape(modernInputName((keyboard?c.keys:c.pad)[0]))+" to aim. Jump keeps your aim and sights active. Leave aim before crouching.</div></div>";
     html+="<div class=\"mc-setting\"><strong>Scope bindings</strong><div class=\"mc-segment\">"+
       modernButton("mc-scope-cycle","Cycle magnification",true)+modernButton("mc-scope-separate","Zoom in / out")+"</div><div class=\"mc-hint\">Press "+
       escape(modernInputName((keyboard?c.keys:c.pad)[7]))+" while scoped to step through zoom levels. Separate zoom bindings are optional.</div></div>";

@@ -154,13 +154,13 @@ repeat while held.
 The scope sensitivity slider multiplies the selected device's existing aiming
 speed. At 100%, existing aim tuning is unchanged. Magnification still slows
 aim automatically. This multiplier applies only to qualified live sniper aiming,
-not ordinary camera movement, swimming or airborne camera ownership. Fractional
+including aiming during jumps; it does not scale ordinary camera movement or swimming. Fractional
 motion is retained for fine adjustment and cleared when the context changes.
 
 Jump and crouch do not double as zoom actions. Jump can start from aim using
-the character's native airborne movement; held/toggled aim resumes on landing.
-Continuous scoped airborne ADS is not implemented. Crouching still requires
-leaving aim. Scoped preview and Settings describe this behavior; their preview
+the character's native airborne movement. Held/toggled aim, sights and sniper
+magnification remain active throughout the jump and landing. Crouching still
+requires leaving aim. Scoped preview and Settings describe this behavior; their preview
 content is instructional, not a live HUD.
 
 ## Rebinding, persistence and recovery
