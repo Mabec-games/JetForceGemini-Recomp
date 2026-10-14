@@ -1,6 +1,7 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include "jfg/platform/environment.hpp"
 #include "jfg/runtime/snapshot_copy.hpp"
 #include "funcs.h"
 #if __has_include("jfg_original_timing.h")
@@ -107,6 +108,30 @@
 #include <SDL.h>
 #endif
 extern "C" BOOLEAN WINAPI SystemFunction036(PVOID, ULONG);
+#elif defined(__linux__)
+#include <csignal>
+#include <dlfcn.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/prctl.h>
+#include <sys/resource.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
+#include <sys/wait.h>
+#include <ucontext.h>
+#include <unistd.h>
+#if defined(JFG_PHASE8_LIVE_RUNTIME)
+#include <SDL.h>
+#include "jfg/platform/sdl_live_window.hpp"
+#endif
+#endif
+
+// The native runner needs a host that can map the guest address space at its
+// fixed layout and intercept device-register accesses. Windows (guard pages
+// plus the x86 trap flag) and Linux x86-64 (PROT_NONE pages plus SIGSEGV and
+// SIGTRAP) provide that; other hosts retain the inert fallback.
+#if defined(JFG_NATIVE_HOST) || (defined(__linux__) && defined(__x86_64__))
+#define JFG_NATIVE_HOST 1
 #endif
 
 #if !defined(JFG_PHASE6_BUILD_IDENTITY)
@@ -131,6 +156,7 @@ constexpr std::size_t kCartUncachedAliasOffset = 0x30000000U;
 constexpr std::size_t kGuestAddressSpan = 0x8A000000U;
 constexpr std::size_t kMmioPageSize = 0x1000U;
 constexpr std::size_t kWindowsAllocationGranularity = 0x10000U;
+constexpr std::size_t kHostPageSize = 0x1000U;
 constexpr std::array<std::size_t, 12U> kMmioHostOffsets = {
     0x24040000U, 0x24100000U, 0x24300000U, 0x24400000U,
     0x24500000U, 0x24600000U, 0x24700000U, 0x24800000U,
@@ -335,18 +361,120 @@ struct MmioTrace final {
   }
 };
 
-#if defined(_WIN32)
+#if defined(JFG_NATIVE_HOST)
 MmioTrace *g_mmio_trace = nullptr;
 
-LONG CALLBACK mmio_exception_handler(EXCEPTION_POINTERS *exception) {
-  if (g_mmio_trace == nullptr || exception == nullptr ||
-      exception->ExceptionRecord == nullptr ||
-      exception->ContextRecord == nullptr)
-    return EXCEPTION_CONTINUE_SEARCH;
-  const DWORD code = exception->ExceptionRecord->ExceptionCode;
-  if (code == EXCEPTION_SINGLE_STEP &&
-      g_mmio_trace->pending_page != nullptr &&
-      g_mmio_trace->pending_thread == GetCurrentThreadId()) {
+enum class MmioFaultAction { search, resume };
+
+#if defined(_WIN32)
+std::uint32_t current_host_thread_id() noexcept { return GetCurrentThreadId(); }
+
+void arm_mmio_page(void *page) noexcept {
+  DWORD previous = 0U;
+  (void)VirtualProtect(page, kMmioPageSize, PAGE_READWRITE | PAGE_GUARD,
+                       &previous);
+}
+#else
+std::uint32_t current_host_thread_id() noexcept {
+  return static_cast<std::uint32_t>(::syscall(SYS_gettid));
+}
+
+void arm_mmio_page(void *page) noexcept {
+  (void)::mprotect(page, kMmioPageSize, PROT_NONE);
+}
+#endif
+
+// Phase 1: the monitored page was touched for the first time. The page has
+// been made accessible by the platform wrapper; fill read values, record the
+// access and ask the wrapper to single-step the faulting instruction.
+MmioFaultAction mmio_guard_fault(const std::uintptr_t address,
+                                 const bool write) {
+  if (g_mmio_trace == nullptr)
+    return MmioFaultAction::search;
+  for (std::size_t index = 0U; index < g_mmio_trace->pages.size(); ++index) {
+    const auto page = reinterpret_cast<std::uintptr_t>(
+        g_mmio_trace->pages[index]);
+    if (address < page || address >= page + kMmioPageSize)
+      continue;
+    const auto offset = static_cast<std::uint32_t>(address - page);
+    if (g_mmio_trace->guest_execution && !write && index >= 10U) {
+      if (index != 10U || offset != 0U) g_mmio_trace->device_error = "unsupported-flash-read";
+      const auto value = g_mmio_trace->flash_bus.status();
+      std::memcpy(reinterpret_cast<void*>(address), &value, 4U);
+    }
+    if (g_mmio_trace->guest_execution && !write && index == 5U) {
+      const auto value = g_mmio_trace->pi_dma.read(offset);
+      if (!value) g_mmio_trace->device_error = "unsupported-pi-register";
+      const auto result = value.value_or(0U);
+      std::memcpy(reinterpret_cast<void*>(address), &result, 4U);
+    }
+    if (g_mmio_trace->guest_execution && !write && index == 4U) {
+      const auto value = g_mmio_trace->ai_dma.read(offset, g_mmio_trace->guest_count);
+      if (!value) g_mmio_trace->device_error = "unsupported-ai-register";
+      const auto result = value.value_or(0U);
+      std::memcpy(reinterpret_cast<void*>(address), &result, 4U);
+    }
+    if (g_mmio_trace->guest_execution && !write && index == 7U) {
+      const auto value = g_mmio_trace->si_dma.read(offset);
+      if (!value) g_mmio_trace->device_error = "unsupported-si-register";
+      const auto result = value.value_or(0U);
+      std::memcpy(reinterpret_cast<void*>(address), &result, 4U);
+    }
+    if (g_mmio_trace->guest_execution && !write && index == 2U && offset == 8U)
+      std::memcpy(reinterpret_cast<void*>(address), &g_mmio_trace->mi_pending, 4U);
+    if (g_mmio_trace->guest_execution && !write && index == 3U && offset == 0x10U) {
+      const auto origin = g_mmio_trace->vi_next - g_mmio_trace->vi_period;
+      const auto line = g_mmio_trace->vi_period == 783520U ?
+          static_cast<std::uint32_t>(((g_mmio_trace->guest_count - origin) * 263U) /
+              g_mmio_trace->vi_period) * 2U :
+          static_cast<std::uint32_t>((g_mmio_trace->guest_count - origin) / 1500U) & ~1U;
+      std::memcpy(reinterpret_cast<void*>(address), &line, 4U);
+    }
+    if (index == 9U && (!g_mmio_trace->guest_pif_boot || offset != 0x7fcU)) {
+      ++g_mmio_trace->unsupported_accesses;
+      return MmioFaultAction::search;
+    }
+    if (!write && index == 9U) {
+      const auto control = g_mmio_trace->pif_boot.read();
+      std::memcpy(reinterpret_cast<void*>(address), &control, 4U);
+    }
+    if (!write && g_mmio_trace->guest_sp_status && (index == 0U || index == 8U)) {
+      const auto value = index == 8U ? (offset == 0U ?
+          std::optional<std::uint32_t>{g_mmio_trace->sp_dma.pc()} : std::nullopt) :
+          offset == 0x10U ? std::optional<std::uint32_t>{g_mmio_trace->sp_status.read()} :
+          g_mmio_trace->sp_dma.read(offset);
+      if (!value.has_value()) {
+        ++g_mmio_trace->unsupported_accesses;
+        return MmioFaultAction::search;
+      }
+      std::memcpy(reinterpret_cast<void*>(address), &*value, 4U);
+    }
+    if (!write && g_mmio_trace->guest_mi_mask && index == 2U && offset == 0x0cU) {
+      const auto mask = g_mmio_trace->mi_mask.read();
+      std::memcpy(reinterpret_cast<void*>(address), &mask, 4U);
+    }
+    if (!g_mmio_trace->guest_execution && !write && index == 4U && offset == 0x04U) {
+      std::memcpy(reinterpret_cast<void *>(address),
+                  &g_mmio_trace->ai_emulated_remaining_length,
+                  sizeof(g_mmio_trace->ai_emulated_remaining_length));
+    }
+    g_mmio_trace->record(index, address, write);
+    g_mmio_trace->pending_page = g_mmio_trace->pages[index];
+    g_mmio_trace->pending_page_index = index;
+    g_mmio_trace->pending_address = address;
+    g_mmio_trace->pending_write = write;
+    g_mmio_trace->pending_thread = current_host_thread_id();
+    return MmioFaultAction::resume;
+  }
+  return MmioFaultAction::search;
+}
+// Phase 2: the faulting instruction retired. Apply write side effects, then
+// re-arm the page.
+MmioFaultAction mmio_single_step() {
+  if (g_mmio_trace == nullptr)
+    return MmioFaultAction::search;
+  if (g_mmio_trace != nullptr && g_mmio_trace->pending_page != nullptr &&
+      g_mmio_trace->pending_thread == current_host_thread_id()) {
     if (g_mmio_trace->pending_page_index == 9U && g_mmio_trace->pending_write) {
       std::uint32_t command = 0U;
       std::memcpy(&command, reinterpret_cast<const void*>(g_mmio_trace->pending_address), 4U);
@@ -354,14 +482,14 @@ LONG CALLBACK mmio_exception_handler(EXCEPTION_POINTERS *exception) {
           g_mmio_trace->pending_address - reinterpret_cast<std::uintptr_t>(g_mmio_trace->pending_page) != 0x7fcU ||
           !g_mmio_trace->pif_boot.write(command)) {
         ++g_mmio_trace->unsupported_accesses;
-        return EXCEPTION_CONTINUE_SEARCH;
+        return MmioFaultAction::search;
       }
       const auto control = g_mmio_trace->pif_boot.read();
       std::memcpy(reinterpret_cast<void*>(g_mmio_trace->pending_address), &control, 4U);
       if (g_mmio_trace->guest_execution) {
         if (!g_mmio_trace->si_dma.boot_command(g_mmio_trace->guest_count)) {
           ++g_mmio_trace->unsupported_accesses;
-          return EXCEPTION_CONTINUE_SEARCH;
+          return MmioFaultAction::search;
         }
         // Independently phased direct PIF-command-8 probe: SI assertion is
         // 2304 Count ticks after retirement, not immediate acknowledgement.
@@ -382,7 +510,7 @@ LONG CALLBACK mmio_exception_handler(EXCEPTION_POINTERS *exception) {
             (stopped && g_mmio_trace->sp_dma.write(offset, command, g_mmio_trace->sp_rdram));
       if (!valid) {
         ++g_mmio_trace->unsupported_accesses;
-        return EXCEPTION_CONTINUE_SEARCH;
+        return MmioFaultAction::search;
       }
       if (status_register) {
         const auto status = g_mmio_trace->sp_status.read();
@@ -406,7 +534,7 @@ LONG CALLBACK mmio_exception_handler(EXCEPTION_POINTERS *exception) {
       std::memcpy(&command, reinterpret_cast<const void*>(g_mmio_trace->pending_address), 4U);
       if (!g_mmio_trace->mi_mask.command(command)) {
         ++g_mmio_trace->unsupported_accesses;
-        return EXCEPTION_CONTINUE_SEARCH;
+        return MmioFaultAction::search;
       }
       const auto mask = g_mmio_trace->mi_mask.read();
       std::memcpy(reinterpret_cast<void*>(g_mmio_trace->pending_address), &mask, 4U);
@@ -517,14 +645,27 @@ LONG CALLBACK mmio_exception_handler(EXCEPTION_POINTERS *exception) {
         break;
       }
     }
-    DWORD previous = 0U;
-    (void)VirtualProtect(g_mmio_trace->pending_page, kMmioPageSize,
-                         PAGE_READWRITE | PAGE_GUARD, &previous);
+    arm_mmio_page(g_mmio_trace->pending_page);
     g_mmio_trace->pending_page = nullptr;
     g_mmio_trace->pending_page_index = SIZE_MAX;
     g_mmio_trace->pending_address = 0U;
     g_mmio_trace->pending_write = false;
     g_mmio_trace->pending_thread = 0U;
+    return MmioFaultAction::resume;
+  }
+  return MmioFaultAction::search;
+}
+
+#if defined(_WIN32)
+LONG CALLBACK mmio_exception_handler(EXCEPTION_POINTERS *exception) {
+  if (g_mmio_trace == nullptr || exception == nullptr ||
+      exception->ExceptionRecord == nullptr ||
+      exception->ContextRecord == nullptr)
+    return EXCEPTION_CONTINUE_SEARCH;
+  const DWORD code = exception->ExceptionRecord->ExceptionCode;
+  if (code == EXCEPTION_SINGLE_STEP) {
+    if (mmio_single_step() != MmioFaultAction::resume)
+      return EXCEPTION_CONTINUE_SEARCH;
     exception->ContextRecord->EFlags &= ~DWORD{0x100U};
     return EXCEPTION_CONTINUE_EXECUTION;
   }
@@ -533,89 +674,99 @@ LONG CALLBACK mmio_exception_handler(EXCEPTION_POINTERS *exception) {
     return EXCEPTION_CONTINUE_SEARCH;
   const auto address = static_cast<std::uintptr_t>(
       exception->ExceptionRecord->ExceptionInformation[1]);
-  for (std::size_t index = 0U; index < g_mmio_trace->pages.size(); ++index) {
-    const auto page = reinterpret_cast<std::uintptr_t>(
-        g_mmio_trace->pages[index]);
-    if (address < page || address >= page + kMmioPageSize)
-      continue;
-    const bool write =
-        exception->ExceptionRecord->ExceptionInformation[0] == 1U;
-    const auto offset = static_cast<std::uint32_t>(address - page);
-    if (g_mmio_trace->guest_execution && !write && index >= 10U) {
-      if (index != 10U || offset != 0U) g_mmio_trace->device_error = "unsupported-flash-read";
-      const auto value = g_mmio_trace->flash_bus.status();
-      std::memcpy(reinterpret_cast<void*>(address), &value, 4U);
-    }
-    if (g_mmio_trace->guest_execution && !write && index == 5U) {
-      const auto value = g_mmio_trace->pi_dma.read(offset);
-      if (!value) g_mmio_trace->device_error = "unsupported-pi-register";
-      const auto result = value.value_or(0U);
-      std::memcpy(reinterpret_cast<void*>(address), &result, 4U);
-    }
-    if (g_mmio_trace->guest_execution && !write && index == 4U) {
-      const auto value = g_mmio_trace->ai_dma.read(offset, g_mmio_trace->guest_count);
-      if (!value) g_mmio_trace->device_error = "unsupported-ai-register";
-      const auto result = value.value_or(0U);
-      std::memcpy(reinterpret_cast<void*>(address), &result, 4U);
-    }
-    if (g_mmio_trace->guest_execution && !write && index == 7U) {
-      const auto value = g_mmio_trace->si_dma.read(offset);
-      if (!value) g_mmio_trace->device_error = "unsupported-si-register";
-      const auto result = value.value_or(0U);
-      std::memcpy(reinterpret_cast<void*>(address), &result, 4U);
-    }
-    if (g_mmio_trace->guest_execution && !write && index == 2U && offset == 8U)
-      std::memcpy(reinterpret_cast<void*>(address), &g_mmio_trace->mi_pending, 4U);
-    if (g_mmio_trace->guest_execution && !write && index == 3U && offset == 0x10U) {
-      const auto origin = g_mmio_trace->vi_next - g_mmio_trace->vi_period;
-      const auto line = g_mmio_trace->vi_period == 783520U ?
-          static_cast<std::uint32_t>(((g_mmio_trace->guest_count - origin) * 263U) /
-              g_mmio_trace->vi_period) * 2U :
-          static_cast<std::uint32_t>((g_mmio_trace->guest_count - origin) / 1500U) & ~1U;
-      std::memcpy(reinterpret_cast<void*>(address), &line, 4U);
-    }
-    if (index == 9U && (!g_mmio_trace->guest_pif_boot || offset != 0x7fcU)) {
-      ++g_mmio_trace->unsupported_accesses;
-      return EXCEPTION_CONTINUE_SEARCH;
-    }
-    if (!write && index == 9U) {
-      const auto control = g_mmio_trace->pif_boot.read();
-      std::memcpy(reinterpret_cast<void*>(address), &control, 4U);
-    }
-    if (!write && g_mmio_trace->guest_sp_status && (index == 0U || index == 8U)) {
-      const auto value = index == 8U ? (offset == 0U ?
-          std::optional<std::uint32_t>{g_mmio_trace->sp_dma.pc()} : std::nullopt) :
-          offset == 0x10U ? std::optional<std::uint32_t>{g_mmio_trace->sp_status.read()} :
-          g_mmio_trace->sp_dma.read(offset);
-      if (!value.has_value()) {
-        ++g_mmio_trace->unsupported_accesses;
-        return EXCEPTION_CONTINUE_SEARCH;
-      }
-      std::memcpy(reinterpret_cast<void*>(address), &*value, 4U);
-    }
-    if (!write && g_mmio_trace->guest_mi_mask && index == 2U && offset == 0x0cU) {
-      const auto mask = g_mmio_trace->mi_mask.read();
-      std::memcpy(reinterpret_cast<void*>(address), &mask, 4U);
-    }
-    if (!g_mmio_trace->guest_execution && !write && index == 4U && offset == 0x04U) {
-      std::memcpy(reinterpret_cast<void *>(address),
-                  &g_mmio_trace->ai_emulated_remaining_length,
-                  sizeof(g_mmio_trace->ai_emulated_remaining_length));
-    }
-    g_mmio_trace->record(index, address, write);
-    g_mmio_trace->pending_page = g_mmio_trace->pages[index];
-    g_mmio_trace->pending_page_index = index;
-    g_mmio_trace->pending_address = address;
-    g_mmio_trace->pending_write = write;
-    g_mmio_trace->pending_thread = GetCurrentThreadId();
-    exception->ContextRecord->EFlags |= DWORD{0x100U};
-    return EXCEPTION_CONTINUE_EXECUTION;
+  const bool write = exception->ExceptionRecord->ExceptionInformation[0] == 1U;
+  if (mmio_guard_fault(address, write) != MmioFaultAction::resume)
+    return EXCEPTION_CONTINUE_SEARCH;
+  exception->ContextRecord->EFlags |= DWORD{0x100U};
+  return EXCEPTION_CONTINUE_EXECUTION;
+}
+#else
+// Linux: monitored pages are PROT_NONE. SIGSEGV opens the page for exactly one
+// instruction by setting the x86 trap flag; SIGTRAP then applies the device
+// side effects and closes the page again. Faults that are not ours are passed
+// to whichever handler was installed before (normally the default, which
+// terminates the process just as an unhandled Windows exception would).
+struct sigaction g_previous_segv{};
+struct sigaction g_previous_trap{};
+bool g_mmio_handlers_installed = false;
+
+void chain_signal(const struct sigaction &previous, const int signal_number,
+                  siginfo_t *info, void *context) noexcept {
+  if ((previous.sa_flags & SA_SIGINFO) != 0 && previous.sa_sigaction != nullptr) {
+    previous.sa_sigaction(signal_number, info, context);
+  } else if (previous.sa_handler != SIG_DFL && previous.sa_handler != SIG_IGN &&
+             previous.sa_handler != nullptr) {
+    previous.sa_handler(signal_number);
+  } else if (previous.sa_handler == SIG_IGN) {
+    return;
+  } else {
+    // Restore the default action; returning re-raises the fault under it.
+    (void)::signal(signal_number, SIG_DFL);
   }
-  return EXCEPTION_CONTINUE_SEARCH;
+}
+
+void mmio_segv_handler(const int signal_number, siginfo_t *info,
+                       void *context) {
+  auto *const user = static_cast<ucontext_t *>(context);
+  if (g_mmio_trace != nullptr && info != nullptr && user != nullptr) {
+    const auto address = reinterpret_cast<std::uintptr_t>(info->si_addr);
+    for (void *const page : g_mmio_trace->pages) {
+      const auto begin = reinterpret_cast<std::uintptr_t>(page);
+      if (page == nullptr || address < begin || address >= begin + kMmioPageSize)
+        continue;
+      (void)::mprotect(page, kMmioPageSize, PROT_READ | PROT_WRITE);
+      const bool write = (user->uc_mcontext.gregs[REG_ERR] & 0x2) != 0;
+      if (mmio_guard_fault(address, write) == MmioFaultAction::resume) {
+        user->uc_mcontext.gregs[REG_EFL] |= 0x100;
+        return;
+      }
+      arm_mmio_page(page);
+      break;
+    }
+  }
+  chain_signal(g_previous_segv, signal_number, info, context);
+}
+
+void mmio_trap_handler(const int signal_number, siginfo_t *info,
+                       void *context) {
+  auto *const user = static_cast<ucontext_t *>(context);
+  if (g_mmio_trace != nullptr && user != nullptr &&
+      mmio_single_step() == MmioFaultAction::resume) {
+    user->uc_mcontext.gregs[REG_EFL] &= ~static_cast<greg_t>(0x100);
+    return;
+  }
+  chain_signal(g_previous_trap, signal_number, info, context);
+}
+
+bool install_mmio_signal_handlers() noexcept {
+  if (g_mmio_handlers_installed)
+    return true;
+  struct sigaction action{};
+  action.sa_sigaction = mmio_segv_handler;
+  action.sa_flags = SA_SIGINFO | SA_RESTART;
+  sigemptyset(&action.sa_mask);
+  if (::sigaction(SIGSEGV, &action, &g_previous_segv) != 0)
+    return false;
+  action.sa_sigaction = mmio_trap_handler;
+  if (::sigaction(SIGTRAP, &action, &g_previous_trap) != 0) {
+    (void)::sigaction(SIGSEGV, &g_previous_segv, nullptr);
+    return false;
+  }
+  g_mmio_handlers_installed = true;
+  return true;
+}
+
+void remove_mmio_signal_handlers() noexcept {
+  if (!g_mmio_handlers_installed)
+    return;
+  (void)::sigaction(SIGSEGV, &g_previous_segv, nullptr);
+  (void)::sigaction(SIGTRAP, &g_previous_trap, nullptr);
+  g_mmio_handlers_installed = false;
 }
 #endif
+#endif  // JFG_NATIVE_HOST
 
-#if defined(_WIN32) && defined(JFG_PHASE8_LIVE_RUNTIME)
+#if defined(JFG_NATIVE_HOST) && defined(JFG_PHASE8_LIVE_RUNTIME)
 class HostAudioDevice final {
 public:
   HostAudioDevice() = default;
@@ -766,11 +917,9 @@ private:
   void refresh_volume(const std::uint32_t frequency) {
     if (!volume_path_checked_) {
       volume_path_checked_ = true;
-      wchar_t *path = nullptr;
-      std::size_t length = 0;
-      if (_wdupenv_s(&path, &length, L"JFG_MASTER_VOLUME_CONFIG") == 0 && path) {
-        volume_path_ = std::filesystem::path(path);
-        std::free(path);
+      if (jfg::platform::get_environment_path("JFG_MASTER_VOLUME_CONFIG",
+                                              volume_path_) ==
+          jfg::platform::PathVariable::ok) {
         volume_file_.start(volume_path_);
       }
     }
@@ -826,7 +975,7 @@ private:
   [[nodiscard]] static bool null_sink_requested() noexcept {
     char *value = nullptr;
     std::size_t length = 0U;
-    if (_dupenv_s(&value, &length, "JFG_PHASE9_NULL_AUDIO") != 0 ||
+    if (jfg::platform::dupenv_s(&value, &length, "JFG_PHASE9_NULL_AUDIO") != 0 ||
         value == nullptr)
       return false;
     const bool requested = value[0] == '1' && value[1] == '\0';
@@ -1003,6 +1152,18 @@ public:
       CloseHandle(mapping_);
     if (rom_mapping_ != nullptr)
       CloseHandle(rom_mapping_);
+#elif defined(JFG_NATIVE_HOST)
+    if (g_mmio_trace == &mmio_trace_) {
+      remove_mmio_signal_handlers();
+      g_mmio_trace = nullptr;
+    }
+    // One unmap releases the reservation and every view placed inside it.
+    if (base_ != nullptr)
+      (void)::munmap(base_, kGuestAddressSpan);
+    if (ram_fd_ >= 0)
+      (void)::close(ram_fd_);
+    if (rom_fd_ >= 0)
+      (void)::close(rom_fd_);
 #endif
   }
   GuestBacking(const GuestBacking &) = delete;
@@ -1118,13 +1279,75 @@ public:
       base_ = nullptr;
     }
     return false;
+#elif defined(JFG_NATIVE_HOST)
+    ram_fd_ = static_cast<int>(::syscall(SYS_memfd_create, "jfg-rdram", 1U /* MFD_CLOEXEC */));
+    rom_fd_ = static_cast<int>(::syscall(SYS_memfd_create, "jfg-rom", 1U /* MFD_CLOEXEC */));
+    if (ram_fd_ < 0 || rom_fd_ < 0 ||
+        ::ftruncate(ram_fd_, static_cast<off_t>(kRdramSize)) != 0 ||
+        ::ftruncate(rom_fd_, static_cast<off_t>(kRomSize)) != 0)
+      return false;
+    // Reserve the whole guest span inaccessible. Every view below replaces a
+    // part of it, so unmapped gaps keep faulting instead of being reachable by
+    // a wild guest pointer, and the host allocator can never land inside.
+    void *const span = ::mmap(nullptr, kGuestAddressSpan, PROT_NONE,
+                              MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (span == MAP_FAILED)
+      return false;
+    base_ = static_cast<std::uint8_t *>(span);
+    const int rw = PROT_READ | PROT_WRITE;
+    std::uint8_t *const ram = place(0U, kRdramSize, rw, MAP_SHARED, ram_fd_);
+    alias_ = place(kKseg1AliasOffset, kRdramSize, rw, MAP_SHARED, ram_fd_);
+    cart_cached_ = place(kCartCachedAliasOffset, kRomSize, rw, MAP_SHARED, rom_fd_);
+    cart_uncached_ = place(kCartUncachedAliasOffset, kRomSize, PROT_READ, MAP_SHARED, rom_fd_);
+    bool ok = ram != nullptr && alias_ != nullptr && cart_cached_ != nullptr &&
+              cart_uncached_ != nullptr;
+    for (std::size_t index = 0U; ok && index < mmio_.size(); ++index) {
+      mmio_[index] = place(kMmioHostOffsets[index], kMmioPageSize, rw,
+                           MAP_PRIVATE | MAP_ANONYMOUS, -1);
+      ok = mmio_[index] != nullptr;
+    }
+    overlays_.assign(jfg_generated_section_count(), nullptr);
+    for (std::uint32_t section = 0U; ok && section < overlays_.size(); ++section) {
+      JfgGeneratedSectionMetadata metadata{};
+      if (jfg_generated_section_metadata(section, &metadata) == 0) {
+        ok = false;
+        break;
+      }
+      if (metadata.is_overlay != 1U)
+        continue;
+      const std::uint64_t extent = std::uint64_t{metadata.text_size} +
+                                   metadata.data_size + metadata.bss_size;
+      const std::uint64_t allocation =
+          (extent + kHostPageSize - 1U) & ~(std::uint64_t{kHostPageSize} - 1U);
+      const std::uint64_t host_offset =
+          std::uint64_t{0x80000000U} + metadata.linked_vram;
+      if (extent == 0U || allocation > SIZE_MAX ||
+          host_offset > kGuestAddressSpan ||
+          allocation > kGuestAddressSpan - host_offset) {
+        ok = false;
+        break;
+      }
+      overlays_[section] =
+          place(static_cast<std::size_t>(host_offset),
+                static_cast<std::size_t>(allocation), rw,
+                MAP_PRIVATE | MAP_ANONYMOUS, -1);
+      ok = overlays_[section] != nullptr;
+    }
+    if (ok)
+      return true;
+    (void)::munmap(base_, kGuestAddressSpan);
+    base_ = alias_ = cart_cached_ = cart_uncached_ = nullptr;
+    mmio_.fill(nullptr);
+    overlays_.clear();
+    placed_.clear();
+    return false;
 #else
     bytes_.resize(kRdramSize);
     return true;
 #endif
   }
   std::span<std::uint8_t> bytes() noexcept {
-#if defined(_WIN32)
+#if defined(JFG_NATIVE_HOST)
     return {base_, base_ == nullptr ? 0U : kRdramSize};
 #else
     return bytes_;
@@ -1206,6 +1429,20 @@ public:
         return false;
     }
     return true;
+#elif defined(JFG_NATIVE_HOST)
+    mmio_trace_.journal = &journal;
+    mmio_trace_.pages = mmio_;
+    g_mmio_trace = &mmio_trace_;
+    if (!install_mmio_signal_handlers()) {
+      g_mmio_trace = nullptr;
+      return false;
+    }
+    for (void *page : mmio_) {
+      if (page == nullptr ||
+          ::mprotect(page, kMmioPageSize, PROT_NONE) != 0)
+        return false;
+    }
+    return true;
 #else
     (void)journal;
     return false;
@@ -1219,17 +1456,23 @@ public:
 
   bool load_overlay_images(
       const std::span<const std::uint8_t> rom) noexcept {
-#if defined(_WIN32)
+#if defined(JFG_NATIVE_HOST)
     if (rom.size() != kRomSize || cart_cached_ == nullptr ||
         cart_uncached_ == nullptr ||
         overlays_.size() != jfg_generated_section_count())
       return false;
     for (std::size_t index = 0U; index < rom.size(); ++index)
       cart_cached_[index ^ 3U] = rom[index];
+#if defined(_WIN32)
     DWORD previous = 0U;
     if (VirtualProtect(cart_cached_, kRomSize, PAGE_READONLY, &previous) == 0 ||
         VirtualProtect(cart_uncached_, kRomSize, PAGE_READONLY, &previous) == 0)
       return false;
+#else
+    if (::mprotect(cart_cached_, kRomSize, PROT_READ) != 0 ||
+        ::mprotect(cart_uncached_, kRomSize, PROT_READ) != 0)
+      return false;
+#endif
     for (std::uint32_t section = 0U; section < overlays_.size(); ++section) {
       JfgGeneratedSectionMetadata metadata{};
       if (jfg_generated_section_metadata(section, &metadata) == 0)
@@ -1266,6 +1509,33 @@ private:
   std::vector<void *> overlays_;
   std::vector<void *> gaps_;
   PVOID exception_handler_ = nullptr;
+#elif defined(JFG_NATIVE_HOST)
+  // Maps [offset, offset+size) of the reserved span, refusing any overlap with
+  // a view that is already placed (MAP_FIXED would silently replace it).
+  std::uint8_t *place(const std::size_t offset, const std::size_t size,
+                      const int protection, const int flags, const int fd) {
+    if (offset > kGuestAddressSpan || size > kGuestAddressSpan - offset)
+      return nullptr;
+    for (const auto &[begin, length] : placed_)
+      if (offset < begin + length && begin < offset + size)
+        return nullptr;
+    void *const view = ::mmap(base_ + offset, size, protection,
+                              flags | MAP_FIXED, fd, 0);
+    if (view == MAP_FAILED)
+      return nullptr;
+    placed_.emplace_back(offset, size);
+    return static_cast<std::uint8_t *>(view);
+  }
+
+  int ram_fd_ = -1;
+  int rom_fd_ = -1;
+  std::uint8_t *base_ = nullptr;
+  std::uint8_t *alias_ = nullptr;
+  std::uint8_t *cart_cached_ = nullptr;
+  std::uint8_t *cart_uncached_ = nullptr;
+  std::array<void *, kMmioHostOffsets.size()> mmio_{};
+  std::vector<void *> overlays_;
+  std::vector<std::pair<std::size_t, std::size_t>> placed_;
 #else
   std::vector<std::uint8_t> bytes_;
 #endif
@@ -1449,7 +1719,10 @@ struct State : JfgOriginalTimingFast {
   std::uint32_t guest_active_rsp_task = 0U, guest_active_rsp_type = 0U;
   std::uint64_t guest_exceptions = 0U;
   jfg::AsyncDiagnosticFile guest_clock_trace;
-  std::unique_ptr<FILE, decltype(&std::fclose)> device_event_stream{nullptr, &std::fclose};
+  struct FileCloser final {
+    void operator()(FILE *file) const noexcept { (void)std::fclose(file); }
+  };
+  std::unique_ptr<FILE, FileCloser> device_event_stream;
   jfg_device_event_probe device_event_probe{};
   std::ofstream eret_transfer_stream;
   EretTransferProbe eret_transfer_probe;
@@ -1740,9 +2013,10 @@ struct State : JfgOriginalTimingFast {
   std::array<std::uint32_t, 16U> last_si_dispatch_trace{};
 };
 
-#if defined(_WIN32) && defined(JFG_PHASE8_LIVE_RUNTIME)
+#if defined(JFG_NATIVE_HOST) && defined(JFG_PHASE8_LIVE_RUNTIME)
 State *g_active_child_state = nullptr;
 
+#if defined(_WIN32)
 class LiveRt64Window final {
 public:
   static constexpr UINT kAspectMessage = WM_APP + 22U;
@@ -1888,6 +2162,36 @@ private:
   DWORD thread_id_ = 0;
   std::thread owner_;
 };
+#else
+constexpr int VK_ESCAPE = 0x1B;
+
+class LiveRt64Window;
+LiveRt64Window *g_live_window = nullptr;
+// Binds the SDL window to the guest state; see jfg/platform/sdl_live_window.hpp.
+class LiveRt64Window final {
+public:
+  LiveRt64Window(State &state, const bool visible)
+      : window_(state.window_input, state.pc_mouse_captured, visible) {
+    state.native_window = window_.native_handle();
+    state.pc_raw_available = window_.relative_mouse_available();
+    g_live_window = this;
+  }
+  ~LiveRt64Window() {
+    if (g_live_window == this)
+      g_live_window = nullptr;
+  }
+  LiveRt64Window(const LiveRt64Window &) = delete;
+  LiveRt64Window &operator=(const LiveRt64Window &) = delete;
+  [[nodiscard]] void *get() const noexcept { return window_.native_handle(); }
+  [[nodiscard]] std::uint32_t thread_id() const noexcept { return window_.thread_id(); }
+  void set_aspect(const std::uint32_t width, const std::uint32_t height) noexcept {
+    window_.set_aspect(width, height);
+  }
+
+private:
+  jfg::platform::SdlLiveWindow window_;
+};
+#endif
 
 bool host_key_down(const State &state, const int virtual_key) noexcept {
   return virtual_key >= 0 && virtual_key < 256 &&
@@ -1921,6 +2225,18 @@ void trace_phase9_event(State &state, const char *event,
                     << static_cast<int>(state.latched_controller_stick_y) << '\n';
 }
 
+#if !defined(_WIN32)
+bool read_xinput_device(int device,
+                        jfg::StandardControllerSample &sample) noexcept {
+  static jfg::platform::SdlGamepads gamepads;
+  jfg::platform::SdlGamepads::State pad;
+  if (!gamepads.read(device, pad))
+    return false;
+  sample.buttons = pad.buttons;
+  sample.axes = pad.axes;
+  return true;
+}
+#else
 bool read_xinput_device(int device,
                         jfg::StandardControllerSample &sample) noexcept {
   using XInputGetStateFn = DWORD(WINAPI *)(DWORD, XINPUT_STATE *);
@@ -1971,6 +2287,7 @@ bool read_xinput_device(int device,
                  state.Gamepad.bRightTrigger * 32767 / 255};
   return true;
 }
+#endif
 
 void reload_controller_ports(State &state) {
   const auto now = std::chrono::steady_clock::now();
@@ -1988,8 +2305,11 @@ void reload_controller_ports(State &state) {
   if(pc_enabled!=state.pc_experimental) {
     state.pc_experimental=pc_enabled;state.pc_aim.fill({});
     state.pc_mouse.clear();state.pc_wheel.clear();state.pc_wheel_key=0;
-    state.pc_mouse_captured=false;ClipCursor(nullptr);
+    state.pc_mouse_captured=false;
+#if defined(_WIN32)
+    ClipCursor(nullptr);
     SetCursor(LoadCursorW(nullptr,MAKEINTRESOURCEW(32512)));
+#endif
     (void)state.controller_input_gate.blocked(true,state.controller_ports.samples);
   }
   for (std::size_t p = 0; p < 4; ++p) {
@@ -2133,9 +2453,15 @@ void sample_live_controller(State &state) noexcept {
     buttons=sample.buttons;stick_x=sample.x;stick_y=sample.y;
   }
 
+#if defined(_WIN32)
   const HWND root=state.native_window ? GetAncestor(static_cast<HWND>(state.native_window),GA_ROOT) : nullptr;
   const bool settings_capture=state.play_mode && root && GetPropW(root,L"JfgSettingsOpen")!=nullptr;
   const bool ui_capture=state.play_mode && root && (GetForegroundWindow()!=root || settings_capture);
+#else
+  // No embedding launcher: the game owns its window outright.
+  const bool settings_capture=false;
+  const bool ui_capture=false;
+#endif
   auto release_samples=state.controller_ports.samples;
   for(std::size_t p=0;p<4;++p)if(state.pc_aim[p].x || state.pc_aim[p].y)release_samples[p].buttons|=1;
   const bool block_physical=state.controller_input_gate.blocked(ui_capture,release_samples);
@@ -2148,6 +2474,7 @@ void sample_live_controller(State &state) noexcept {
   want_mouse=want_mouse && state.pc_experimental && state.pc_raw_available && !block_physical && !state.input_replay_loaded && (state.input_record_path.empty() || state.pc_record_extended) &&
     jfg::mod::gameplay_active(pc_memory,state.phase9_player_actor) && pc_memory.u8(0x800FD7BDU)==0 &&
     !jfg::mod::scripted_camera_active(pc_memory,state.phase9_player_actor);
+#if defined(_WIN32)
   if(want_mouse && state.native_window) {
     const HWND window=static_cast<HWND>(state.native_window);RECT rect{};GetClientRect(window,&rect);
     MapWindowPoints(window,nullptr,reinterpret_cast<POINT*>(&rect),2);ClipCursor(&rect);SetCursor(nullptr);
@@ -2155,6 +2482,10 @@ void sample_live_controller(State &state) noexcept {
     if(state.pc_mouse_captured){ClipCursor(nullptr);SetCursor(LoadCursorW(nullptr,MAKEINTRESOURCEW(32512)));}
     state.pc_mouse.clear();
   }
+#else
+  // The window thread follows pc_mouse_captured with relative mouse mode.
+  if(!(want_mouse && state.native_window))state.pc_mouse.clear();
+#endif
   state.pc_mouse_captured=want_mouse;
   if(block_physical){state.pc_aim.fill({});state.pc_wheel.clear();state.pc_mouse.clear();state.pc_orbits.fill({});}
   if(!state.pc_experimental || pc_memory.u8(0x800FD7BDU)!=0 || !jfg::mod::gameplay_active(pc_memory,state.phase9_player_actor) ||
@@ -2181,7 +2512,11 @@ void sample_live_controller(State &state) noexcept {
   // Map-driven automation may run while its tool window has focus. Settings
   // still suppress synthesized inputs below, as well as physical controller input.
   if (state.navigation_mod.enabled) {
+#if defined(_WIN32)
     const bool escape = host_key_down(state, VK_ESCAPE) || (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
+#else
+    const bool escape = host_key_down(state, VK_ESCAPE);
+#endif
     const bool manual = buttons != 0U || stick_x != 0 || stick_y != 0 || escape;
     // Retain manual cancellation across room resets and between map exports.
     if (manual) ++state.navigation_mod.manual_inputs;
@@ -2274,7 +2609,12 @@ void sample_live_controller(State &state) noexcept {
       static_cast<std::uint8_t>(stick_y)});
   if (buttons != 0U || stick_x != 0 || stick_y != 0)
     ++state.non_neutral_controller_samples;
-  if (!GetParent(static_cast<HWND>(state.native_window)) && !state.input_replay_loaded && !state.navigation_mod.enabled && host_key_down(state, VK_ESCAPE))
+#if defined(_WIN32)
+  const bool window_embedded = GetParent(static_cast<HWND>(state.native_window)) != nullptr;
+#else
+  const bool window_embedded = false;
+#endif
+  if (!window_embedded && !state.input_replay_loaded && !state.navigation_mod.enabled && host_key_down(state, VK_ESCAPE))
     state.exit_requested = true;
   state.host_key_presses.fill(false);
 }
@@ -2355,9 +2695,16 @@ void service_live_window(State &state) {
       presentation.width * state.window_presentation.height !=
           state.window_presentation.width * presentation.height) {
     state.window_presentation = presentation;
+#if defined(_WIN32)
     PostMessageW(static_cast<HWND>(state.native_window),LiveRt64Window::kAspectMessage,
         presentation.width,static_cast<LPARAM>(presentation.height));
+#else
+    if (g_live_window != nullptr)
+      g_live_window->set_aspect(static_cast<std::uint32_t>(presentation.width),
+                                static_cast<std::uint32_t>(presentation.height));
+#endif
   }
+#if defined(_WIN32)
   const auto frontend = state.native_window ? GetAncestor(static_cast<HWND>(state.native_window), GA_ROOT) : nullptr;
   bool frontend_paused = false;
   while (!state.exit_requested && frontend && IsWindow(frontend) &&
@@ -2383,6 +2730,7 @@ void service_live_window(State &state) {
     state.host_frame_start_initialized = false;
     state.original_os_host_anchor_ready = false;
   }
+#endif
   if (state.original_os_host_pacing) return;
   if (!state.host_frame_deadline_initialized) {
     state.host_frame_deadline = std::chrono::steady_clock::now();
@@ -2476,7 +2824,7 @@ bool write_private_rt64_snapshot(
   return static_cast<bool>(stream);
 }
 
-#if defined(_WIN32) && defined(JFG_PHASE8_LIVE_RUNTIME)
+#if defined(JFG_NATIVE_HOST) && defined(JFG_PHASE8_LIVE_RUNTIME)
 bool write_mod_export(State &state, const std::filesystem::path &path, const std::string &text) {
   const auto copy = std::make_shared<const std::string>(text);
   if (path.filename() == L"mesh.json") {
@@ -2781,7 +3129,7 @@ void write_retrace_semantic_hash(State &state, std::ostream *update_output = nul
   if (actor_table_valid) {
     for (std::uint32_t index = 0U; index < actor_count; ++index) {
       std::uint32_t actor = 0U;
-      (void)memory.read_u32(actor_list + index * sizeof(std::uint32_t), actor);
+      (void)memory.read_u32(actor_list + index * 4U, actor);
       const auto digest = actor == 0U
           ? std::nullopt
           : hash_logical_rdram_region(state, actor, kActorStateBytes);
@@ -3466,7 +3814,7 @@ bool resolve_bzero_host_offset(const State &state, const std::uint32_t address,
     return true;
   }
 
-#if defined(_WIN32) && defined(JFG_PHASE8_LIVE_RUNTIME)
+#if defined(JFG_NATIVE_HOST) && defined(JFG_PHASE8_LIVE_RUNTIME)
   // Generated overlay-local references use their normalized synthetic VRAM
   // addresses. GuestBacking reserves and commits those exact windows at the
   // offset used by the generated MEM_* helpers, so HLE memory primitives must
@@ -3921,7 +4269,7 @@ bool execute_live_audio_task(State &state, hle::GuestMemory &memory) {
   return true;
 }
 
-#if defined(_WIN32)
+#if defined(JFG_NATIVE_HOST)
 bool initialize_live_renderer(State &state, LiveRt64Window &window) {
   if (state.rdram == nullptr || state.rom == nullptr ||
       state.rom_size < jfg::kRt64RequiredHeaderBytes ||
@@ -3943,6 +4291,21 @@ bool initialize_live_renderer(State &state, LiveRt64Window &window) {
   state.rt64_vi.x_scale = 0x00000200U;
   state.rt64_vi.y_scale = 0x00000400U;
   jfg::Rt64ShellError error = jfg::Rt64ShellError::none;
+#if !defined(_WIN32)
+  // RT64 prints to stdout during setup; the parent expects a single canonical
+  // line, so route it to /dev/null until the renderer is created.
+  std::fflush(stdout);
+  const int saved_stdout = ::dup(STDOUT_FILENO);
+  const int null_stdout = ::open("/dev/null", O_WRONLY | O_CLOEXEC);
+  if (saved_stdout < 0 || null_stdout < 0 ||
+      ::dup2(null_stdout, STDOUT_FILENO) < 0) {
+    if (saved_stdout >= 0)
+      ::close(saved_stdout);
+    if (null_stdout >= 0)
+      ::close(null_stdout);
+    return false;
+  }
+#else
   const int saved_stdout = _dup(_fileno(stdout));
   HANDLE null_handle = CreateFileW(
       L"NUL", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
@@ -3962,6 +4325,7 @@ bool initialize_live_renderer(State &state, LiveRt64Window &window) {
       _close(null_stdout);
     return false;
   }
+#endif
   state.rt64_shell = jfg::Rt64Shell::create(
       {window.get(), window.thread_id(),
        std::span<const std::byte>(
@@ -3973,9 +4337,15 @@ bool initialize_live_renderer(State &state, LiveRt64Window &window) {
        jfg::Rt64MemoryLayout::host_word_swapped, true, true},
       error);
   std::fflush(stdout);
+#if !defined(_WIN32)
+  (void)::dup2(saved_stdout, STDOUT_FILENO);
+  ::close(null_stdout);
+  ::close(saved_stdout);
+#else
   (void)_dup2(saved_stdout, _fileno(stdout));
   _close(null_stdout);
   _close(saved_stdout);
+#endif
   state.last_rt64_error = error;
   return state.rt64_shell != nullptr && error == jfg::Rt64ShellError::none;
 }
@@ -4142,7 +4512,58 @@ void ledger(State &state, std::string_view category, std::string_view operation,
   }
 }
 
-#if defined(_WIN32) && defined(JFG_PHASE8_LIVE_RUNTIME)
+#if defined(JFG_NATIVE_HOST) && defined(JFG_PHASE8_LIVE_RUNTIME)
+#if !defined(_WIN32)
+// Linux counterpart of child_exception_filter: records the same fail-closed
+// ledger line (module-relative fault address) and exits with status 4.
+void child_crash_signal(const int signal_number, siginfo_t *info, void *context) {
+  State *const state = g_active_child_state;
+  if (state != nullptr) {
+    const std::uint32_t target =
+        state->recent_dispatch_position == 0U
+            ? 0U
+            : state->recent_dispatches[(state->recent_dispatch_position - 1U) %
+                                       state->recent_dispatches.size()];
+    char support_exception[40]{};
+    std::snprintf(support_exception, sizeof(support_exception),
+                  "native_exception=0x%08x", static_cast<unsigned>(signal_number));
+    jfg::support_event(support_exception);
+    std::array<char, 64U> operation{};
+    if (state->active_bzero_address != 0U) {
+      (void)std::snprintf(operation.data(), operation.size(),
+                          "bzero-%08x-%08x", state->active_bzero_address,
+                          state->active_bzero_length);
+    } else {
+      std::uintptr_t instruction = 0U;
+      if (auto *const user = static_cast<ucontext_t *>(context); user != nullptr)
+        instruction = static_cast<std::uintptr_t>(user->uc_mcontext.gregs[REG_RIP]);
+      Dl_info module{};
+      const auto base = ::dladdr(reinterpret_cast<void *>(instruction), &module) != 0
+                            ? reinterpret_cast<std::uintptr_t>(module.dli_fbase)
+                            : std::uintptr_t{0U};
+      (void)std::snprintf(operation.data(), operation.size(),
+                          signal_number == SIGSEGV || signal_number == SIGBUS
+                              ? "access-rva-%08llx"
+                              : "exception-rva-%08llx",
+                          static_cast<unsigned long long>(instruction - base));
+    }
+    (void)info;
+    ledger(*state, "native-crash", operation.data(), target);
+  }
+  std::_Exit(4);
+}
+
+void install_child_crash_handlers() noexcept {
+  struct sigaction action{};
+  action.sa_sigaction = child_crash_signal;
+  action.sa_flags = SA_SIGINFO | SA_NODEFER;
+  sigemptyset(&action.sa_mask);
+  // SIGSEGV is chained: the MMIO monitor (installed later) forwards every
+  // fault that is not a monitored device page to this handler.
+  for (const int signal_number : {SIGSEGV, SIGBUS, SIGFPE, SIGILL, SIGABRT})
+    (void)::sigaction(signal_number, &action, nullptr);
+}
+#else
 LONG WINAPI child_exception_filter(EXCEPTION_POINTERS *exception) {
   jfg::support_crash(exception);
   State *const state = g_active_child_state;
@@ -4185,11 +4606,12 @@ LONG WINAPI child_exception_filter(EXCEPTION_POINTERS *exception) {
   std::_Exit(4);
 }
 #endif
+#endif
 
 [[noreturn]] void fail_closed_dispatch(State &state, std::string_view category,
                                        std::string_view operation,
                                        std::uint32_t guest_target) {
-#if defined(_WIN32) && defined(JFG_PHASE8_LIVE_RUNTIME)
+#if defined(JFG_NATIVE_HOST) && defined(JFG_PHASE8_LIVE_RUNTIME)
   if (state.input_record.is_open())
     state.input_record.flush();
   if (state.timing_trace.is_open())
@@ -4351,7 +4773,7 @@ LONG WINAPI child_exception_filter(EXCEPTION_POINTERS *exception) {
     (void)std::snprintf(entry, sizeof(entry), "%08x", dispatch_target);
     si_dispatch_trace += entry;
   }
-#if defined(_WIN32) && defined(JFG_PHASE8_LIVE_RUNTIME)
+#if defined(JFG_NATIVE_HOST) && defined(JFG_PHASE8_LIVE_RUNTIME)
   if (!service_host_audio(state, false))
     fail_closed_dispatch(state, "audio", "host-device-final", 0U);
   if (!persist_controller_pak(state))
@@ -4540,10 +4962,10 @@ LONG WINAPI child_exception_filter(EXCEPTION_POINTERS *exception) {
     }
   }
   bool emit_actor_trace = false;
-#if defined(_WIN32)
+#if defined(JFG_NATIVE_HOST)
   char *actor_trace = nullptr;
   std::size_t actor_trace_size = 0U;
-  if (_dupenv_s(&actor_trace, &actor_trace_size, "JFG_PHASE9_ACTOR_TRACE") ==
+  if (jfg::platform::dupenv_s(&actor_trace, &actor_trace_size, "JFG_PHASE9_ACTOR_TRACE") ==
           0 &&
       actor_trace != nullptr && std::strcmp(actor_trace, "1") == 0)
     emit_actor_trace = true;
@@ -4835,7 +5257,7 @@ LONG WINAPI child_exception_filter(EXCEPTION_POINTERS *exception) {
 }
 #endif
 
-#if defined(_WIN32) && defined(JFG_PHASE8_LIVE_RUNTIME)
+#if defined(JFG_NATIVE_HOST) && defined(JFG_PHASE8_LIVE_RUNTIME)
 [[noreturn]] void play_exit(State &state) {
   jfg::support_event("native=closed");
   if (state.mmio_trace == nullptr ||
@@ -4919,7 +5341,7 @@ LONG WINAPI child_exception_filter(EXCEPTION_POINTERS *exception) {
 #endif
 }
 
-#if defined(_WIN32) && defined(JFG_PHASE8_LIVE_RUNTIME)
+#if defined(JFG_NATIVE_HOST) && defined(JFG_PHASE8_LIVE_RUNTIME)
 void complete_guest_sp_status(State &state, const std::uint32_t target) {
   if (!state.guest_leaf_probe) return;
   if (state.mmio_trace == nullptr || !state.mmio_trace->guest_sp_status ||
@@ -5126,7 +5548,7 @@ bool write_guest_byte(State &state, const std::uint32_t address,
 // about hardware interrupt latency. Enabled only by focused update capture.
 void trace_si_timing(State &state, const char *event, std::uint32_t queue,
                      std::uint32_t caller, std::int32_t result) {
-#if defined(_WIN32) && defined(JFG_PHASE8_LIVE_RUNTIME)
+#if defined(JFG_NATIVE_HOST) && defined(JFG_PHASE8_LIVE_RUNTIME)
   const auto si = state.events.find(5U);
   if (si == state.events.end() || queue != si->second.first ||
       state.focus_update_start == 0U || !state.timing_trace.is_open() ||
@@ -5187,7 +5609,7 @@ void service_timers(State &state, const std::uint32_t target) {
 
 // Diagnostic only: the dispatch-based Count is not hardware CPU timing.
 void trace_guest_clock(State &state, const char *event, std::uint32_t address) {
-#if defined(_WIN32) && defined(JFG_PHASE8_LIVE_RUNTIME)
+#if defined(JFG_NATIVE_HOST) && defined(JFG_PHASE8_LIVE_RUNTIME)
   if (state.focus_update_start == 0U || !state.timing_trace.is_open() ||
       state.completed_game_updates + 1U < state.focus_update_start - 1U ||
       state.completed_game_updates + 1U > state.focus_update_end + 1U) return;
@@ -5255,7 +5677,7 @@ void advance_legacy_vi_clock(State &state, const std::uint32_t target) {
 // Presentation consumes already completed work. It does not complete a
 // graphics task, advance Count, or deliver a guest interrupt.
 void present_completed_video(State &state, const std::uint32_t target) {
-#if defined(_WIN32) && defined(JFG_PHASE8_LIVE_RUNTIME)
+#if defined(JFG_NATIVE_HOST) && defined(JFG_PHASE8_LIVE_RUNTIME)
   if (state.play_mode || state.realtime_replay) {
     service_live_window(state);
     if (state.exit_requested)
@@ -5360,7 +5782,7 @@ void present_completed_video(State &state, const std::uint32_t target) {
 }
 
 void latch_next_vi_framebuffer(State &state, const std::uint32_t target) {
-#if defined(_WIN32) && defined(JFG_PHASE8_LIVE_RUNTIME)
+#if defined(JFG_NATIVE_HOST) && defined(JFG_PHASE8_LIVE_RUNTIME)
   if (state.vi_next_framebuffer != 0U) {
     state.vi_current_framebuffer = state.vi_next_framebuffer;
     if (!apply_live_vi_field(state, state.vi_current_framebuffer))
@@ -5414,7 +5836,7 @@ void service_vi_frame(State &state, const std::uint32_t target) {
   state.journal.append(NativeEventKind::kViFrame,
                        static_cast<std::uint32_t>(state.vi_frames));
   present_completed_video(state, target);
-#if defined(_WIN32) && defined(JFG_PHASE8_LIVE_RUNTIME)
+#if defined(JFG_NATIVE_HOST) && defined(JFG_PHASE8_LIVE_RUNTIME)
   complete_pending_live_graphics_tasks(state, target);
 #endif
   latch_next_vi_framebuffer(state, target);
@@ -5511,7 +5933,7 @@ int dispatch(void *opaque, std::int32_t address, std::uint8_t *rdram,
       state.mmio_trace->unsupported_accesses != 0U)
     fail_closed_dispatch(state, "mmio", "unsupported-register", target);
   ++state.dispatch_calls;
-#if defined(_WIN32) && defined(JFG_PHASE8_LIVE_RUNTIME)
+#if defined(JFG_NATIVE_HOST) && defined(JFG_PHASE8_LIVE_RUNTIME)
   // The normal camera has computed its desired point, but has not yet run
   // scenery constraints. Feed the orbit into that existing solver, never over
   // its final position. Qualify both the owning routine and this call site.
@@ -5699,13 +6121,13 @@ int dispatch(void *opaque, std::int32_t address, std::uint8_t *rdram,
     if (context->r4 == 127U || context->r4 == 214U) context->r5 = 2U;
     if (context->r4 == 214U) {
       char value[16]{};
-      const auto length = GetEnvironmentVariableA("QUARRY_FIXTURE_DESTINATION", value, 16U);
+      const auto length = jfg::platform::get_environment_variable("QUARRY_FIXTURE_DESTINATION", value, 16U);
       const auto destination = length > 0U && length < 16U ? std::stoul(value) : 294U;
       if (destination != 294U && destination != 272U && destination != 283U && destination != 354U && destination != 411U && destination != 357U)
         fail_closed_dispatch(state, "diagnostic", "fixture-destination", target);
       context->r4 = destination;
       char group[16]{};
-      const auto group_length = GetEnvironmentVariableA("QUARRY_FIXTURE_GROUP", group, 16U);
+      const auto group_length = jfg::platform::get_environment_variable("QUARRY_FIXTURE_GROUP", group, 16U);
       if (group_length > 0U && group_length < 16U) context->r7 = std::stoul(group);
 
 
@@ -5806,7 +6228,7 @@ int dispatch(void *opaque, std::int32_t address, std::uint8_t *rdram,
   state.recent_dispatches[state.recent_dispatch_position %
                           state.recent_dispatches.size()] = target;
   ++state.recent_dispatch_position;
-#if defined(_WIN32) && defined(JFG_PHASE8_LIVE_RUNTIME)
+#if defined(JFG_NATIVE_HOST) && defined(JFG_PHASE8_LIVE_RUNTIME)
   if (state.vi_retraces >= 5683U && state.dispatch_calls % 1024U == 0U)
     write_private_progress(state, "dispatch");
 #endif
@@ -5820,8 +6242,8 @@ int dispatch(void *opaque, std::int32_t address, std::uint8_t *rdram,
   }
   const auto mapping = std::lower_bound(
       std::begin(kMappings), std::end(kMappings), target,
-      [](const Mapping &candidate, const std::uint32_t address) {
-        return candidate.vram < address;
+      [](const Mapping &candidate, const std::uint32_t guest_address) {
+        return candidate.vram < guest_address;
       });
   // Normalized overlay imports (including original CIC routines) must use
   // the same checked publication/lease path as other generated overlays.
@@ -5957,7 +6379,7 @@ int dispatch(void *opaque, std::int32_t address, std::uint8_t *rdram,
 #endif
       [[maybe_unused]] const std::uint32_t allocation_size =
           static_cast<std::uint32_t>(context->r4);
-#if defined(_WIN32) && defined(JFG_PHASE8_LIVE_RUNTIME)
+#if defined(JFG_NATIVE_HOST) && defined(JFG_PHASE8_LIVE_RUNTIME)
       if (target == 0x80044FACU)
         trace_phase9_event(state, "update-begin", state.controller_samples);
       const bool focus_window = state.focus_update_start != 0U &&
@@ -6045,7 +6467,7 @@ int dispatch(void *opaque, std::int32_t address, std::uint8_t *rdram,
 #endif
       [[maybe_unused]] const auto mod_actor_argument=static_cast<std::uint32_t>(context->r4);
       const auto sound_event_argument = static_cast<std::uint32_t>(context->r5);
-#if defined(_WIN32) && defined(JFG_PHASE8_LIVE_RUNTIME)
+#if defined(JFG_NATIVE_HOST) && defined(JFG_PHASE8_LIVE_RUNTIME)
       if (state.navigation_mod.enabled && target == 0x01002708U) {
         jfg::mod::Memory memory({rdram, kRdramSize});
         const auto original = static_cast<std::uint32_t>(context->r6);
@@ -6064,7 +6486,7 @@ int dispatch(void *opaque, std::int32_t address, std::uint8_t *rdram,
                 memory, *context, mod_actor_argument, sound_event_argument))
           ++state.sound_queue_recoveries;
       }
-#if defined(_WIN32) && defined(JFG_PHASE8_LIVE_RUNTIME)
+#if defined(JFG_NATIVE_HOST) && defined(JFG_PHASE8_LIVE_RUNTIME)
       if (state.navigation_mod.observing() && target==0x80032A48U) {
         jfg::mod::Memory memory({rdram,kRdramSize});
         (void)state.navigation_mod.observe_player(memory,mod_actor_argument);
@@ -6072,7 +6494,7 @@ int dispatch(void *opaque, std::int32_t address, std::uint8_t *rdram,
       }
       if (target==0x80044FACU) update_navigation_mod(state);
 #endif
-#if defined(_WIN32) && defined(JFG_PHASE8_LIVE_RUNTIME)
+#if defined(JFG_NATIVE_HOST) && defined(JFG_PHASE8_LIVE_RUNTIME)
       if (state.entry_probe_target == target && focus_window)
         trace_guest_clock(state, "entry-return", target);
       if (watch_active) {
@@ -6440,7 +6862,7 @@ int dispatch(void *opaque, std::int32_t address, std::uint8_t *rdram,
     if (target == original_os_entry("osViSetEvent")) {
       state.vi_queue = a0; state.vi_message = a1; state.vi_retrace_interval = a2;
     }
-#if defined(_WIN32) && defined(JFG_PHASE8_LIVE_RUNTIME)
+#if defined(JFG_NATIVE_HOST) && defined(JFG_PHASE8_LIVE_RUNTIME)
     if (target == original_os_entry("osViSetMode")) {
       if (!configure_live_vi_mode(state, memory, a0))
         fail_closed_dispatch(state, "guest-vi", "invalid-mode", target);
@@ -6472,7 +6894,7 @@ int dispatch(void *opaque, std::int32_t address, std::uint8_t *rdram,
       if (message == state.vi_message) {
         ++state.vi_retraces;
         jfg::support_breadcrumb(state.vi_frames, state.vi_retraces, state.controller_samples);
-#if defined(_WIN32) && defined(JFG_PHASE8_LIVE_RUNTIME)
+#if defined(JFG_NATIVE_HOST) && defined(JFG_PHASE8_LIVE_RUNTIME)
         write_retrace_semantic_hash(state);
         write_private_progress(state);
 #endif
@@ -6661,7 +7083,7 @@ int dispatch(void *opaque, std::int32_t address, std::uint8_t *rdram,
              state.vi_retraces < state.retrace_target &&
              state.vi_retrace_interval != 0U &&
              state.vi_internal_queue != 0U) {
-#if defined(_WIN32) && defined(JFG_PHASE8_LIVE_RUNTIME)
+#if defined(JFG_NATIVE_HOST) && defined(JFG_PHASE8_LIVE_RUNTIME)
         if (state.focus_update_start != 0U &&
             state.completed_game_updates + 1U >= state.focus_update_start - 1U &&
             state.completed_game_updates + 1U <= state.focus_update_end + 1U &&
@@ -7090,9 +7512,9 @@ int dispatch(void *opaque, std::int32_t address, std::uint8_t *rdram,
   }
 #endif
   if (std::strcmp(name, "osContInit") == 0) {
-#if defined(_WIN32)
+#if defined(JFG_NATIVE_HOST)
     char probe_value[2]{};
-    const bool guest_init_probe = GetEnvironmentVariableA(
+    const bool guest_init_probe = jfg::platform::get_environment_variable(
         "JFG_PHASE9_CONTROLLER_GUEST_INIT", probe_value, sizeof(probe_value)) == 1 &&
         probe_value[0] == '1';
 #else
@@ -7101,9 +7523,9 @@ int dispatch(void *opaque, std::int32_t address, std::uint8_t *rdram,
                                   std::strcmp(probe_value, "1") == 0;
 #endif
     if (guest_init_probe) {
-#if defined(_WIN32)
+#if defined(JFG_NATIVE_HOST)
       char si_probe_value[2]{};
-      state.si_count_probe = GetEnvironmentVariableA("JFG_PHASE9_SI_COUNT_PROBE",
+      state.si_count_probe = jfg::platform::get_environment_variable("JFG_PHASE9_SI_COUNT_PROBE",
           si_probe_value, sizeof(si_probe_value)) == 1 && si_probe_value[0] == '1';
 #else
       const char *si_probe_value = std::getenv("JFG_PHASE9_SI_COUNT_PROBE");
@@ -7119,7 +7541,7 @@ int dispatch(void *opaque, std::int32_t address, std::uint8_t *rdram,
       state.controller_initialized = static_cast<std::uint32_t>(context->r2) == 0U;
       return 1;
     }
-#if defined(_WIN32) && defined(JFG_PHASE8_LIVE_RUNTIME)
+#if defined(JFG_NATIVE_HOST) && defined(JFG_PHASE8_LIVE_RUNTIME)
     sample_controller_ports(state);
     const auto connected_mask=state.input_replay_loaded ? std::uint8_t{1} : state.controller_ports.mask();
 #else
@@ -7150,7 +7572,7 @@ int dispatch(void *opaque, std::int32_t address, std::uint8_t *rdram,
       return 1;
     }
     ++state.controller_read_start_calls;
-#if defined(_WIN32) && defined(JFG_PHASE8_LIVE_RUNTIME)
+#if defined(JFG_NATIVE_HOST) && defined(JFG_PHASE8_LIVE_RUNTIME)
     trace_phase9_event(state, "start-entry", state.controller_samples);
 #endif
     state.controller_read_thread = state.scheduler == nullptr
@@ -7166,7 +7588,7 @@ int dispatch(void *opaque, std::int32_t address, std::uint8_t *rdram,
     }
     ++state.pending_si_completions;
     if (state.si_count_probe) schedule_si_deadline(state, target);
-#if defined(_WIN32) && defined(JFG_PHASE8_LIVE_RUNTIME)
+#if defined(JFG_NATIVE_HOST) && defined(JFG_PHASE8_LIVE_RUNTIME)
     trace_si_timing(state, "read-start", a0, 0U, 0);
     if (state.play_mode || state.input_replay_loaded) {
       std::size_t pressed_high = 0U, pressed_low = 0U;
@@ -7215,7 +7637,7 @@ int dispatch(void *opaque, std::int32_t address, std::uint8_t *rdram,
     state.journal.append(NativeEventKind::kController, 2U, a0,
                          si->second.second);
     set_result(context, hle::kOsSuccess);
-#if defined(_WIN32) && defined(JFG_PHASE8_LIVE_RUNTIME)
+#if defined(JFG_NATIVE_HOST) && defined(JFG_PHASE8_LIVE_RUNTIME)
     // Stop after the Nth controller-read HLE is complete, before the guest
     // consumes its result. This is an input-poll boundary, not a VI boundary.
     if (state.poll_target != 0U &&
@@ -7226,7 +7648,7 @@ int dispatch(void *opaque, std::int32_t address, std::uint8_t *rdram,
   }
   if (std::strcmp(name, "osContGetReadData") == 0) {
     ++state.controller_get_data_calls;
-#if defined(_WIN32) && defined(JFG_PHASE8_LIVE_RUNTIME)
+#if defined(JFG_NATIVE_HOST) && defined(JFG_PHASE8_LIVE_RUNTIME)
     trace_phase9_event(state, "get-entry", state.controller_samples == 0U
                                              ? 0U : state.controller_samples - 1U);
 #endif
@@ -7236,7 +7658,7 @@ int dispatch(void *opaque, std::int32_t address, std::uint8_t *rdram,
     for (std::uint32_t controller = 0U; controller < 4U; ++controller) {
       for (std::uint32_t byte = 0U; byte < 6U; ++byte) {
         std::uint8_t value = byte == 4U && controller != 0U ? 8U : 0U;
-#if defined(_WIN32) && defined(JFG_PHASE8_LIVE_RUNTIME)
+#if defined(JFG_NATIVE_HOST) && defined(JFG_PHASE8_LIVE_RUNTIME)
         if (state.play_mode || state.input_replay_loaded) {
           const auto& port=state.controller_ports.samples[controller];
           if (!port.connected) {
@@ -7274,7 +7696,7 @@ int dispatch(void *opaque, std::int32_t address, std::uint8_t *rdram,
       }
     }
     state.journal.append(NativeEventKind::kController, 3U, a0);
-#if defined(_WIN32) && defined(JFG_PHASE8_LIVE_RUNTIME)
+#if defined(JFG_NATIVE_HOST) && defined(JFG_PHASE8_LIVE_RUNTIME)
     trace_phase9_event(state, "get-exit", state.controller_samples == 0U
                                             ? 0U : state.controller_samples - 1U);
     if (state.controller_return_trace.is_open()) {
@@ -7488,7 +7910,7 @@ int dispatch(void *opaque, std::int32_t address, std::uint8_t *rdram,
     // This neither advances the VI clock nor resubmits a graphics task.
     if (++state.rsp_yield_requests == 1U)
       jfg::support_event("rsp=yield-request-run-to-completion");
-#if defined(_WIN32)
+#if defined(JFG_NATIVE_HOST)
     state.gameplay_trace.event("rsp-yield", {state.vi_retraces,
         state.controller_samples, state.gameplay_trace_updates,
         state.pending_graphics_tasks.size(), state.rsp_yield_requests});
@@ -7568,7 +7990,7 @@ int dispatch(void *opaque, std::int32_t address, std::uint8_t *rdram,
     }
 #if defined(JFG_PHASE8_LIVE_RUNTIME)
     if (state.loaded_rsp_task_type == 2U) {
-#if defined(_WIN32)
+#if defined(JFG_NATIVE_HOST)
       write_private_progress(state, "audio-begin");
 #endif
       const auto audio_start = std::chrono::steady_clock::now();
@@ -7577,12 +7999,12 @@ int dispatch(void *opaque, std::int32_t address, std::uint8_t *rdram,
           std::chrono::duration_cast<std::chrono::microseconds>(
               std::chrono::steady_clock::now() - audio_start)
               .count());
-#if defined(_WIN32)
+#if defined(JFG_NATIVE_HOST)
       write_private_progress(state, "audio-end");
 #endif
       if (!audio_ok)
         fail_closed_dispatch(state, "rsp", "audio-task-rejected", target);
-#if defined(_WIN32)
+#if defined(JFG_NATIVE_HOST)
       complete_guest_sp_status(state, target);
       write_private_progress(state, "audio-completion-begin");
 #endif
@@ -7591,23 +8013,23 @@ int dispatch(void *opaque, std::int32_t address, std::uint8_t *rdram,
           state.scheduler->send(sp->second.first, sp->second.second, false) !=
               hle::kOsSuccess)
         fail_closed_dispatch(state, "rsp", "sp-completion", target);
-#if defined(_WIN32)
+#if defined(JFG_NATIVE_HOST)
       write_private_progress(state, "audio-completion-end");
 #endif
       state.loaded_rsp_task = 0U;
       state.loaded_rsp_task_type = 0U;
       if (state.scheduler_running) {
-#if defined(_WIN32)
+#if defined(JFG_NATIVE_HOST)
         write_private_progress(state, "audio-yield-begin");
 #endif
         state.scheduler->yield_current();
-#if defined(_WIN32)
+#if defined(JFG_NATIVE_HOST)
         write_private_progress(state, "audio-yield-end");
 #endif
       }
       return 1;
     }
-#if defined(_WIN32)
+#if defined(JFG_NATIVE_HOST)
     if (state.loaded_rsp_task_type == 1U) {
       write_private_progress(state, "graphics-prepare-begin");
       const auto graphics_start = std::chrono::steady_clock::now();
@@ -7698,7 +8120,7 @@ int dispatch(void *opaque, std::int32_t address, std::uint8_t *rdram,
   const bool clock_queue = a0 == 0x800FE4B8U || a0 == 0x800FE8A8U ||
                            a0 == 0x800FEB80U;
   if (clock_queue) trace_guest_clock(state, recv ? "recv" : "queue-call", a0);
-#if defined(_WIN32) && defined(JFG_PHASE8_LIVE_RUNTIME)
+#if defined(JFG_NATIVE_HOST) && defined(JFG_PHASE8_LIVE_RUNTIME)
   if (state.focus_update_start != 0U &&
       state.completed_game_updates + 1U >= state.focus_update_start - 1U &&
       state.completed_game_updates + 1U <= state.focus_update_end + 1U &&
@@ -7778,7 +8200,7 @@ int dispatch(void *opaque, std::int32_t address, std::uint8_t *rdram,
            memory.read_u32(a1, message) && message == state.vi_message;
   };
   const auto trace_vi_queue_receive = [&]() {
-#if defined(_WIN32) && defined(JFG_PHASE8_LIVE_RUNTIME)
+#if defined(JFG_NATIVE_HOST) && defined(JFG_PHASE8_LIVE_RUNTIME)
     const bool focused_receive = state.focus_update_start != 0U &&
         state.completed_game_updates + 1U >= state.focus_update_start - 1U &&
         state.completed_game_updates + 1U <= state.focus_update_end + 1U;
@@ -7868,12 +8290,12 @@ int dispatch(void *opaque, std::int32_t address, std::uint8_t *rdram,
         state.vi_messages_delivered > state.vi_retraces) {
       ++state.vi_retraces;
       jfg::support_breadcrumb(state.vi_frames, state.vi_retraces, state.controller_samples);
-#if defined(_WIN32) && defined(JFG_PHASE8_LIVE_RUNTIME)
+#if defined(JFG_NATIVE_HOST) && defined(JFG_PHASE8_LIVE_RUNTIME)
       trace_phase9_event(state, "vi-consumed", state.controller_samples);
 #endif
       state.journal.append(NativeEventKind::kViMessageConsumed, a0, a1,
                            static_cast<std::uint32_t>(state.vi_retraces));
-#if defined(_WIN32) && defined(JFG_PHASE8_LIVE_RUNTIME)
+#if defined(JFG_NATIVE_HOST) && defined(JFG_PHASE8_LIVE_RUNTIME)
       write_retrace_semantic_hash(state);
       write_private_progress(state);
 #endif
@@ -7923,12 +8345,12 @@ int dispatch(void *opaque, std::int32_t address, std::uint8_t *rdram,
         state.vi_messages_delivered > state.vi_retraces) {
       ++state.vi_retraces;
       jfg::support_breadcrumb(state.vi_frames, state.vi_retraces, state.controller_samples);
-#if defined(_WIN32) && defined(JFG_PHASE8_LIVE_RUNTIME)
+#if defined(JFG_NATIVE_HOST) && defined(JFG_PHASE8_LIVE_RUNTIME)
       trace_phase9_event(state, "vi-consumed", state.controller_samples);
 #endif
       state.journal.append(NativeEventKind::kViMessageConsumed, a0, a1,
                            static_cast<std::uint32_t>(state.vi_retraces));
-#if defined(_WIN32) && defined(JFG_PHASE8_LIVE_RUNTIME)
+#if defined(JFG_NATIVE_HOST) && defined(JFG_PHASE8_LIVE_RUNTIME)
       write_retrace_semantic_hash(state);
       write_private_progress(state);
 #endif
@@ -8157,7 +8579,7 @@ std::array<std::uint8_t, 20U> sha1(std::span<const std::uint8_t> input) {
 // An ordinary generated root contains no call sites and is unaffected.
 extern "C" void jfg_phase9_instruction_probe(uint32_t pc, uint8_t *rdram,
                                                recomp_context *context) {
-#if defined(_WIN32) && defined(JFG_PHASE8_LIVE_RUNTIME)
+#if defined(JFG_NATIVE_HOST) && defined(JFG_PHASE8_LIVE_RUNTIME)
   State *const state = g_active_child_state;
   if (state == nullptr || !state->instruction_probe_trace.is_open() ||
       rdram != state->rdram || context == nullptr ||
@@ -8193,7 +8615,7 @@ extern "C" void jfg_phase9_instruction_probe(uint32_t pc, uint8_t *rdram,
 #endif
 }
 
-#if defined(_WIN32) && defined(JFG_PHASE8_LIVE_RUNTIME)
+#if defined(JFG_NATIVE_HOST) && defined(JFG_PHASE8_LIVE_RUNTIME)
 // Host-only diagnostic data. Instruction-entry/successor samples do not by
 // themselves prove retirement, a completed receive or caller equivalence.
 static void emit_device_event(State& state, const recomp_context& cpu,
@@ -8273,7 +8695,7 @@ static void emit_instruction_effect(State& state, const recomp_context& cpu,
 // exception processing must finish before this instruction becomes pending.
 extern "C" void jfg_phase9_instruction_effect_entry(unsigned section, unsigned pc,
     unsigned word, unsigned qualification, void* context) {
-#if defined(_WIN32) && defined(JFG_PHASE8_LIVE_RUNTIME)
+#if defined(JFG_NATIVE_HOST) && defined(JFG_PHASE8_LIVE_RUNTIME)
   if (g_active_child_state != nullptr && context != nullptr) {
     auto& state = *g_active_child_state;
     if (!state.instruction_effect_stream.is_open()) return;
@@ -8289,7 +8711,7 @@ extern "C" void jfg_phase9_instruction_effect_entry(unsigned section, unsigned p
 
 extern "C" void jfg_phase9_instruction_effect(unsigned section, unsigned pc,
     unsigned word, void* context) {
-#if defined(_WIN32) && defined(JFG_PHASE8_LIVE_RUNTIME)
+#if defined(JFG_NATIVE_HOST) && defined(JFG_PHASE8_LIVE_RUNTIME)
   if (g_active_child_state != nullptr && context != nullptr)
     emit_instruction_effect(*g_active_child_state, *static_cast<recomp_context*>(context),
                             1U, section, pc, word);
@@ -8309,7 +8731,7 @@ extern "C" __declspec(noinline) void jfg_phase9_execution_probe_slow(
 // path's large stack frame. The same predicate, cost and state updates run.
 extern "C" void jfg_phase9_execution_probe(unsigned section, unsigned pc,
                                           unsigned word, void* context) {
-#if defined(_WIN32) && defined(JFG_PHASE8_LIVE_RUNTIME)
+#if defined(JFG_NATIVE_HOST) && defined(JFG_PHASE8_LIVE_RUNTIME)
   if (g_active_child_state != nullptr && context != nullptr) {
     auto& state = *g_active_child_state;
     // Private optimization: ordinary instructions before the next event need
@@ -8355,7 +8777,7 @@ extern "C" void jfg_phase9_execution_probe(unsigned section, unsigned pc,
 
 extern "C" void jfg_phase9_execution_probe_predecoded(unsigned metadata, unsigned pc,
                                           unsigned word, void* context) {
-#if defined(_WIN32) && defined(JFG_PHASE8_LIVE_RUNTIME)
+#if defined(JFG_NATIVE_HOST) && defined(JFG_PHASE8_LIVE_RUNTIME)
   const unsigned section=metadata&255U;
   if (g_active_child_state != nullptr && context != nullptr) {
     auto& state = *g_active_child_state;
@@ -8395,7 +8817,7 @@ extern "C" void jfg_phase9_execution_probe_predecoded(unsigned metadata, unsigne
 
 extern "C" __declspec(noinline) void jfg_phase9_execution_probe_slow(unsigned section, unsigned pc,
                                           unsigned word, void *context) {
-#if defined(_WIN32) && defined(JFG_PHASE8_LIVE_RUNTIME)
+#if defined(JFG_NATIVE_HOST) && defined(JFG_PHASE8_LIVE_RUNTIME)
   if (g_active_child_state != nullptr && context != nullptr) {
     auto& state = *g_active_child_state;
     if (state.eret_transfer_stream.is_open() &&
@@ -8825,43 +9247,40 @@ int run_child(const char *path, const unsigned retrace_target,
   }
   jfg::GeneratedOverlayRuntime runtime(std::as_writable_bytes(rdram));
   State state{};
-#if defined(_WIN32) && defined(JFG_PHASE8_LIVE_RUNTIME)
+#if defined(JFG_NATIVE_HOST) && defined(JFG_PHASE8_LIVE_RUNTIME)
   char mod_flag[2]{};
-  if (GetEnvironmentVariableA("JFG_NAVIGATION_MOD",mod_flag,2U)==1U && mod_flag[0]=='1') {
-    wchar_t output[32768]{};
-    const DWORD length=GetEnvironmentVariableW(L"JFG_MOD_OUTPUT",output,32768U);
-    if(length==0U || length>=32768U) {
+  if (jfg::platform::get_environment_variable("JFG_NAVIGATION_MOD",mod_flag,2U)==1U && mod_flag[0]=='1') {
+    if(jfg::platform::get_environment_path("JFG_MOD_OUTPUT",state.navigation_output)!=
+        jfg::platform::PathVariable::ok) {
       std::fputs("navigation mod requires JFG_MOD_OUTPUT\n",stderr);return 2;
     }
-    state.navigation_output=std::filesystem::path(output);
     std::error_code error;std::filesystem::create_directories(state.navigation_output,error);
     if(error)return 2;
     state.navigation_mod.enabled=true;
     // File open/flush stays on the diagnostic worker, never the guest thread.
-    (void)state.movement_trace.start(state.navigation_output/L"movement-samples.csv", 4U*1024U*1024U);
-    (void)state.jump_trace.start(state.navigation_output/L"jump-samples.csv", 4U*1024U*1024U);
+    (void)state.movement_trace.start(state.navigation_output/"movement-samples.csv", 4U*1024U*1024U);
+    (void)state.jump_trace.start(state.navigation_output/"jump-samples.csv", 4U*1024U*1024U);
     jfg::support_event("mod=navigation-enabled");
     char speed_flag[2]{};
     state.navigation_mod.juno_double_run =
-        GetEnvironmentVariableA("JFG_MOD_JUNO_DOUBLE_RUN", speed_flag, 2U) == 1U &&
+        jfg::platform::get_environment_variable("JFG_MOD_JUNO_DOUBLE_RUN", speed_flag, 2U) == 1U &&
         speed_flag[0] == '1';
     if (state.navigation_mod.juno_double_run)
       jfg::support_event("mod=juno-run-speed-2x-enabled");
   }
   // Live tools observe by default; map Mods explicitly opt into individual changes.
   if (!state.navigation_mod.enabled) {
-    wchar_t output[32768]{};
-    const DWORD length=GetEnvironmentVariableW(L"JFG_LIVE_OUTPUT",output,32768U);
-    if (length != 0U && length < 32768U) {
-      state.navigation_output=std::filesystem::path(output);
+    if (jfg::platform::get_environment_path("JFG_LIVE_OUTPUT",state.navigation_output)==
+        jfg::platform::PathVariable::ok) {
       std::error_code error;std::filesystem::create_directories(state.navigation_output,error);
       if (!error) state.navigation_mod.telemetry_enabled=true;
     }
   }
-  wchar_t gameplay_trace_path[32768]{};
-  const DWORD trace_path_length = GetEnvironmentVariableW(L"JFG_GAMEPLAY_TRACE", gameplay_trace_path, 32768U);
-  if (trace_path_length != 0U && (trace_path_length >= 32768U ||
-      !state.gameplay_trace.open(std::filesystem::path(gameplay_trace_path)))) {
+  std::filesystem::path gameplay_trace_path;
+  const auto trace_path_status = jfg::platform::get_environment_path("JFG_GAMEPLAY_TRACE", gameplay_trace_path);
+  if (trace_path_status != jfg::platform::PathVariable::unset &&
+      (trace_path_status == jfg::platform::PathVariable::too_long ||
+      !state.gameplay_trace.open(gameplay_trace_path))) {
     std::fputs("native boot setup failed: gameplay trace path\n", stderr);
     return 3;
   }
@@ -8871,12 +9290,12 @@ int run_child(const char *path, const unsigned retrace_target,
   jfg_original_timing_state = &state;
   state.instruction_cache = ic; state.data_cache = dc; state.cache_counters = cache_stats;
   jfg::support_event("native=rom-ready");
-  wchar_t mapping_path[32768]{};
-  const DWORD mapping_length = GetEnvironmentVariableW(L"JFG_CONTROLLER_CONFIG", mapping_path, 32768U);
-  if (mapping_length != 0U) {
-    state.controller_config_path=std::filesystem::path(mapping_path);
-    std::ifstream mapping_file(std::filesystem::path(mapping_path), std::ios::binary | std::ios::ate);
-    if (mapping_length >= 32768U || !mapping_file || mapping_file.tellg() > 4096 || mapping_file.tellg() <= 0) {
+  std::filesystem::path mapping_path;
+  const auto mapping_status = jfg::platform::get_environment_path("JFG_CONTROLLER_CONFIG", mapping_path);
+  if (mapping_status != jfg::platform::PathVariable::unset) {
+    state.controller_config_path=mapping_path;
+    std::ifstream mapping_file(mapping_path, std::ios::binary | std::ios::ate);
+    if (mapping_status == jfg::platform::PathVariable::too_long || !mapping_file || mapping_file.tellg() > 4096 || mapping_file.tellg() <= 0) {
       jfg::support_event("native=controller-invalid");
       return 2;
     }
@@ -8892,28 +9311,28 @@ int run_child(const char *path, const unsigned retrace_target,
   // One opt-in runtime mode owns CPU, OS, device clocks and host pacing.
   // Diagnostic traces and the travel fixture are independent and optional.
   char timing_fixture_flag[2]{};
-  state.timing_fixture = GetEnvironmentVariableA("JFG_TIMING_TEST_FIXTURE",timing_fixture_flag,2U)==1U &&
+  state.timing_fixture = jfg::platform::get_environment_variable("JFG_TIMING_TEST_FIXTURE",timing_fixture_flag,2U)==1U &&
       timing_fixture_flag[0]=='1';
   char original_timing_flag[2]{};
-  const auto timing_override = GetEnvironmentVariableA("JFG_ORIGINAL_TIMING", original_timing_flag, 2U);
+  const auto timing_override = jfg::platform::get_environment_variable("JFG_ORIGINAL_TIMING", original_timing_flag, 2U);
   const bool original_timing_mode = timing_override == 1U ? original_timing_flag[0] == '1' :
       JFG_ORIGINAL_TIMING_GENERATION == 1;
   if (original_timing_mode && JFG_ORIGINAL_TIMING_GENERATION != 1 && timing_override != 1U)
     return 3;
   char writeback_flag[2]{};
   state.renderer_writeback_probe = original_timing_mode || (
-      GetEnvironmentVariableA("JFG_PHASE9_RENDERER_WRITEBACK_PROBE", writeback_flag, 2U) == 1U &&
+      jfg::platform::get_environment_variable("JFG_PHASE9_RENDERER_WRITEBACK_PROBE", writeback_flag, 2U) == 1U &&
       writeback_flag[0] == '1');
   char leaf_flag[2]{};
   state.guest_leaf_probe = original_timing_mode || (
-      GetEnvironmentVariableA("JFG_PHASE9_GUEST_LEAF_PROBE", leaf_flag, 2U) == 1U &&
+      jfg::platform::get_environment_variable("JFG_PHASE9_GUEST_LEAF_PROBE", leaf_flag, 2U) == 1U &&
       leaf_flag[0] == '1');
   char os_flag[2]{};
   state.guest_os_probe = original_timing_mode || (
-      GetEnvironmentVariableA("JFG_PHASE9_GUEST_OS_PROBE", os_flag, 2U) == 1U && os_flag[0] == '1');
+      jfg::platform::get_environment_variable("JFG_PHASE9_GUEST_OS_PROBE", os_flag, 2U) == 1U && os_flag[0] == '1');
   char original_pacing_flag[2]{};
   state.original_os_host_pacing = original_timing_mode || (
-      GetEnvironmentVariableA("JFG_DIAGNOSTIC_OS_VI_PACING", original_pacing_flag, 2U) == 1U &&
+      jfg::platform::get_environment_variable("JFG_DIAGNOSTIC_OS_VI_PACING", original_pacing_flag, 2U) == 1U &&
       original_pacing_flag[0] == '1');
   if (state.original_os_host_pacing && !state.guest_os_probe) return 3;
   if (state.guest_os_probe && !state.guest_leaf_probe) {
@@ -8922,7 +9341,11 @@ int run_child(const char *path, const unsigned retrace_target,
   }
   if (state.guest_leaf_probe)
     state.tlb_registers = jfg::boot::TlbRegisters32::observed_mupen_boot();
+#if defined(_WIN32)
   (void)SetUnhandledExceptionFilter(child_exception_filter);
+#else
+  install_child_crash_handlers();
+#endif
 #endif
   state.retrace_target =
       play_mode || poll_target != 0U
@@ -8931,10 +9354,10 @@ int run_child(const char *path, const unsigned retrace_target,
   state.poll_target = poll_target;
 #if defined(JFG_PHASE8_LIVE_RUNTIME)
   state.play_mode = play_mode;
-#if defined(_WIN32)
+#if defined(JFG_NATIVE_HOST)
   char *fast_replay = nullptr;
   std::size_t fast_replay_size = 0U;
-  if (_dupenv_s(&fast_replay, &fast_replay_size,
+  if (jfg::platform::dupenv_s(&fast_replay, &fast_replay_size,
                 "JFG_PHASE9_FAST_REPLAY") != 0) {
     std::fputs("native boot setup failed: fast replay environment\n",
                stderr);
@@ -8951,7 +9374,7 @@ int run_child(const char *path, const unsigned retrace_target,
   std::free(fast_replay);
   char *capture = nullptr;
   std::size_t capture_size = 0U;
-  if (_dupenv_s(&capture, &capture_size, "JFG_PHASE8_FRAME_CAPTURE") != 0) {
+  if (jfg::platform::dupenv_s(&capture, &capture_size, "JFG_PHASE8_FRAME_CAPTURE") != 0) {
     std::fputs("native boot setup failed: frame capture environment\n",
                stderr);
     return 3;
@@ -8967,7 +9390,7 @@ int run_child(const char *path, const unsigned retrace_target,
   std::free(capture);
   char *pcm_capture = nullptr;
   std::size_t pcm_capture_size = 0U;
-  if (_dupenv_s(&pcm_capture, &pcm_capture_size,
+  if (jfg::platform::dupenv_s(&pcm_capture, &pcm_capture_size,
                 "JFG_PHASE8_PCM_CAPTURE") != 0) {
     std::fputs("native boot setup failed: PCM capture environment\n",
                stderr);
@@ -8983,7 +9406,7 @@ int run_child(const char *path, const unsigned retrace_target,
   std::free(pcm_capture);
   char *rdram_capture = nullptr;
   std::size_t rdram_capture_size = 0U;
-  if (_dupenv_s(&rdram_capture, &rdram_capture_size,
+  if (jfg::platform::dupenv_s(&rdram_capture, &rdram_capture_size,
                 "JFG_PHASE8_RDRAM_CAPTURE") != 0) {
     std::fputs("native boot setup failed: RDRAM capture environment\n",
                stderr);
@@ -9000,7 +9423,7 @@ int run_child(const char *path, const unsigned retrace_target,
   std::free(rdram_capture);
   char *progress = nullptr;
   std::size_t progress_size = 0U;
-  if (_dupenv_s(&progress, &progress_size, "JFG_PHASE8_PROGRESS") != 0) {
+  if (jfg::platform::dupenv_s(&progress, &progress_size, "JFG_PHASE8_PROGRESS") != 0) {
     std::fputs("native boot setup failed: progress environment\n", stderr);
     return 3;
   }
@@ -9015,7 +9438,7 @@ int run_child(const char *path, const unsigned retrace_target,
   std::free(progress);
   char *record_path = nullptr;
   std::size_t record_path_size = 0U;
-  if (_dupenv_s(&record_path, &record_path_size,
+  if (jfg::platform::dupenv_s(&record_path, &record_path_size,
                 "JFG_PHASE9_INPUT_RECORD") != 0) {
     std::fputs("native boot setup failed: input record environment\n", stderr);
     return 3;
@@ -9031,7 +9454,7 @@ int run_child(const char *path, const unsigned retrace_target,
   std::free(record_path);
   char *actor_trace = nullptr;
   std::size_t actor_trace_size = 0U;
-  if (_dupenv_s(&actor_trace, &actor_trace_size,
+  if (jfg::platform::dupenv_s(&actor_trace, &actor_trace_size,
                 "JFG_PHASE9_ACTOR_TRACE") != 0) {
     std::fputs("native boot setup failed: actor trace environment\n", stderr);
     return 3;
@@ -9047,7 +9470,7 @@ int run_child(const char *path, const unsigned retrace_target,
   std::free(actor_trace);
   char *retrace_hash = nullptr;
   std::size_t retrace_hash_size = 0U;
-  if (_dupenv_s(&retrace_hash, &retrace_hash_size,
+  if (jfg::platform::dupenv_s(&retrace_hash, &retrace_hash_size,
                 "JFG_PHASE9_RETRACE_HASH") != 0) {
     std::fputs("native boot setup failed: retrace hash environment\n",
                stderr);
@@ -9064,7 +9487,7 @@ int run_child(const char *path, const unsigned retrace_target,
   std::free(retrace_hash);
   char *replay_by_poll = nullptr;
   std::size_t replay_by_poll_size = 0U;
-  if (_dupenv_s(&replay_by_poll, &replay_by_poll_size,
+  if (jfg::platform::dupenv_s(&replay_by_poll, &replay_by_poll_size,
                 "JFG_PHASE9_REPLAY_BY_POLL") != 0) {
     std::fputs("native boot setup failed: replay poll environment\n", stderr);
     return 3;
@@ -9080,7 +9503,7 @@ int run_child(const char *path, const unsigned retrace_target,
   std::free(replay_by_poll);
   char *replay_path = nullptr;
   std::size_t replay_path_size = 0U;
-  if (_dupenv_s(&replay_path, &replay_path_size,
+  if (jfg::platform::dupenv_s(&replay_path, &replay_path_size,
                 "JFG_PHASE8_INPUT_REPLAY") != 0) {
     std::fputs("native boot setup failed: input replay environment\n",
                stderr);
@@ -9109,7 +9532,7 @@ int run_child(const char *path, const unsigned retrace_target,
   // without opening another game window or consuming live controller input.
   char *realtime_replay = nullptr;
   std::size_t realtime_replay_size = 0U;
-  if (_dupenv_s(&realtime_replay, &realtime_replay_size,
+  if (jfg::platform::dupenv_s(&realtime_replay, &realtime_replay_size,
                 "JFG_PHASE9_REALTIME_REPLAY") != 0) {
     std::fputs("native boot setup failed: realtime replay environment\n", stderr);
     return 3;
@@ -9134,7 +9557,7 @@ int run_child(const char *path, const unsigned retrace_target,
   }
   char *save_path = nullptr;
   std::size_t save_path_size = 0U;
-  if (_dupenv_s(&save_path, &save_path_size, "JFG_PHASE8_SAVE_PATH") != 0) {
+  if (jfg::platform::dupenv_s(&save_path, &save_path_size, "JFG_PHASE8_SAVE_PATH") != 0) {
     std::fputs("native boot setup failed: save environment\n", stderr);
     return 3;
   }
@@ -9147,7 +9570,7 @@ int run_child(const char *path, const unsigned retrace_target,
   std::free(save_path);
   char *controller_pak_path = nullptr;
   std::size_t controller_pak_path_size = 0U;
-  if (_dupenv_s(&controller_pak_path, &controller_pak_path_size,
+  if (jfg::platform::dupenv_s(&controller_pak_path, &controller_pak_path_size,
                 "JFG_PHASE8_CONTROLLER_PAK_PATH") != 0) {
     std::fputs("native boot setup failed: controller pak environment\n",
                stderr);
@@ -9247,7 +9670,7 @@ int run_child(const char *path, const unsigned retrace_target,
       std::fputs("native boot setup failed: input record open\n", stderr);
       return 3;
     }
-#if defined(_WIN32)
+#if defined(JFG_NATIVE_HOST)
     reload_controller_ports(state);
     state.pc_record_extended=state.pc_experimental;
 #endif
@@ -9265,7 +9688,7 @@ int run_child(const char *path, const unsigned retrace_target,
            "\"schema\":1}\n";
     char *updates = nullptr;
     std::size_t updates_size = 0U;
-    if (_dupenv_s(&updates, &updates_size, "JFG_PHASE9_UPDATE_HASHES") != 0) {
+    if (jfg::platform::dupenv_s(&updates, &updates_size, "JFG_PHASE9_UPDATE_HASHES") != 0) {
       std::fputs("native boot setup failed: update hash environment\n", stderr);
       return 3;
     }
@@ -9287,7 +9710,7 @@ int run_child(const char *path, const unsigned retrace_target,
           << "{\"kind\":\"jfg-phase9-update-hash-header\",\"schema\":1}\n";
       char *focus = nullptr;
       std::size_t focus_size = 0U;
-      if (_dupenv_s(&focus, &focus_size, "JFG_PHASE9_FOCUS_UPDATES") != 0) {
+      if (jfg::platform::dupenv_s(&focus, &focus_size, "JFG_PHASE9_FOCUS_UPDATES") != 0) {
         std::fputs("native boot setup failed: focus environment\n", stderr);
         return 3;
       }
@@ -9322,7 +9745,7 @@ int run_child(const char *path, const unsigned retrace_target,
   }
   char *update_word = nullptr;
   std::size_t update_word_size = 0U;
-  if (_dupenv_s(&update_word, &update_word_size,
+  if (jfg::platform::dupenv_s(&update_word, &update_word_size,
                 "JFG_PHASE9_UPDATE_WORD") != 0) {
     std::fputs("native boot setup failed: update word environment\n", stderr);
     return 3;
@@ -9360,7 +9783,7 @@ int run_child(const char *path, const unsigned retrace_target,
   }
   char *watch = nullptr;
   std::size_t watch_size = 0U;
-  if (_dupenv_s(&watch, &watch_size, "JFG_PHASE9_WATCH_WORD") != 0) {
+  if (jfg::platform::dupenv_s(&watch, &watch_size, "JFG_PHASE9_WATCH_WORD") != 0) {
     std::fputs("native boot setup failed: watch environment\n", stderr);
     return 3;
   }
@@ -9399,7 +9822,7 @@ int run_child(const char *path, const unsigned retrace_target,
   }
   char *entry = nullptr;
   std::size_t entry_size = 0U;
-  if (_dupenv_s(&entry, &entry_size, "JFG_PHASE9_ENTRY_TARGET") != 0) {
+  if (jfg::platform::dupenv_s(&entry, &entry_size, "JFG_PHASE9_ENTRY_TARGET") != 0) {
     std::fputs("native boot setup failed: entry environment\n", stderr);
     return 3;
   }
@@ -9438,7 +9861,7 @@ int run_child(const char *path, const unsigned retrace_target,
   }
   char *entry_fpu = nullptr;
   std::size_t entry_fpu_size = 0U;
-  if (_dupenv_s(&entry_fpu, &entry_fpu_size, "JFG_PHASE9_ENTRY_FPU") != 0) {
+  if (jfg::platform::dupenv_s(&entry_fpu, &entry_fpu_size, "JFG_PHASE9_ENTRY_FPU") != 0) {
     std::fputs("native boot setup failed: entry FPU environment\n", stderr);
     return 3;
   }
@@ -9468,7 +9891,7 @@ int run_child(const char *path, const unsigned retrace_target,
   }
   char *entry_memory = nullptr;
   std::size_t entry_memory_size = 0U;
-  if (_dupenv_s(&entry_memory, &entry_memory_size,
+  if (jfg::platform::dupenv_s(&entry_memory, &entry_memory_size,
                 "JFG_PHASE9_ENTRY_MEMORY") != 0) {
     std::fputs("native boot setup failed: entry memory environment\n", stderr);
     return 3;
@@ -9499,7 +9922,7 @@ int run_child(const char *path, const unsigned retrace_target,
   }
   char *entry_gpr = nullptr;
   std::size_t entry_gpr_size = 0U;
-  if (_dupenv_s(&entry_gpr, &entry_gpr_size, "JFG_PHASE9_ENTRY_GPR") != 0) {
+  if (jfg::platform::dupenv_s(&entry_gpr, &entry_gpr_size, "JFG_PHASE9_ENTRY_GPR") != 0) {
     std::fputs("native boot setup failed: entry GPR environment\n", stderr);
     return 3;
   }
@@ -9531,7 +9954,7 @@ int run_child(const char *path, const unsigned retrace_target,
   const auto point_addresses = [](const char* name) {
     char* raw = nullptr;
     std::size_t size = 0;
-    if (_dupenv_s(&raw, &size, name) != 0)
+    if (jfg::platform::dupenv_s(&raw, &size, name) != 0)
       return std::optional<std::vector<std::uint32_t>>{};
     const auto parsed = point_probe_addresses(raw == nullptr ? "" : raw);
     std::free(raw);
@@ -9550,7 +9973,7 @@ int run_child(const char *path, const unsigned retrace_target,
   state.point_probe_words = *point_words;
   char* device_events = nullptr;
   std::size_t device_events_size = 0U;
-  if (_dupenv_s(&device_events, &device_events_size, "JFG_PHASE9_DEVICE_EVENTS") != 0) return 3;
+  if (jfg::platform::dupenv_s(&device_events, &device_events_size, "JFG_PHASE9_DEVICE_EVENTS") != 0) return 3;
   const bool trace_device_events = device_events != nullptr && std::string_view(device_events) == "1";
   const bool invalid_device_events = device_events != nullptr && !trace_device_events;
   std::free(device_events);
@@ -9561,7 +9984,12 @@ int run_child(const char *path, const unsigned retrace_target,
   if (trace_device_events) {
     const auto device_event_path = std::filesystem::path(state.retrace_hash_path).parent_path() / "device-events.tsv";
     FILE* device_event_output = nullptr;
+#if defined(_WIN32)
     if (_wfopen_s(&device_event_output, device_event_path.c_str(), L"wb") != 0 || device_event_output == nullptr) return 3;
+#else
+    device_event_output = std::fopen(device_event_path.c_str(), "wb");
+    if (device_event_output == nullptr) return 3;
+#endif
     state.device_event_stream.reset(device_event_output);
     const auto event_first = static_cast<std::uint32_t>((std::max)(std::uint64_t{1}, state.focus_update_start - 1U));
     const auto event_last = static_cast<std::uint32_t>(state.focus_update_end + 1U);
@@ -9569,7 +9997,7 @@ int run_child(const char *path, const unsigned retrace_target,
   }
   char* eret_transfers = nullptr;
   std::size_t eret_transfers_size = 0U;
-  if (_dupenv_s(&eret_transfers, &eret_transfers_size, "JFG_PHASE9_ERET_TRANSFERS") != 0) return 3;
+  if (jfg::platform::dupenv_s(&eret_transfers, &eret_transfers_size, "JFG_PHASE9_ERET_TRANSFERS") != 0) return 3;
   const bool trace_eret_transfers = eret_transfers != nullptr && std::string_view(eret_transfers) == "1";
   const bool invalid_eret_transfers = eret_transfers != nullptr && !trace_eret_transfers;
   std::free(eret_transfers);
@@ -9581,7 +10009,7 @@ int run_child(const char *path, const unsigned retrace_target,
   }
   char* instruction_effects = nullptr;
   std::size_t instruction_effects_size = 0U;
-  if (_dupenv_s(&instruction_effects, &instruction_effects_size, "JFG_PHASE9_INSTRUCTION_EFFECT_UPDATE") != 0) return 3;
+  if (jfg::platform::dupenv_s(&instruction_effects, &instruction_effects_size, "JFG_PHASE9_INSTRUCTION_EFFECT_UPDATE") != 0) return 3;
   if (instruction_effects != nullptr) {
     const std::string_view value(instruction_effects);
     const auto parsed = std::from_chars(value.data(), value.data() + value.size(), state.instruction_effect_update);
@@ -9608,7 +10036,7 @@ int run_child(const char *path, const unsigned retrace_target,
     state.point_probe_trace << std::dec << std::setfill(' ') << '\n';
   }
   std::size_t instruction_probe_size = 0U;
-  if (_dupenv_s(&instruction_probe, &instruction_probe_size,
+  if (jfg::platform::dupenv_s(&instruction_probe, &instruction_probe_size,
                 "JFG_PHASE9_INSTRUCTION_PROBE") != 0) {
     std::fputs("native boot setup failed: instruction probe environment\n", stderr);
     return 3;
@@ -9653,7 +10081,7 @@ int run_child(const char *path, const unsigned retrace_target,
 #if defined(JFG_PHASE8_LIVE_RUNTIME)
   char *poll_path = nullptr;
   std::size_t poll_path_size = 0U;
-  if (_dupenv_s(&poll_path, &poll_path_size,
+  if (jfg::platform::dupenv_s(&poll_path, &poll_path_size,
                 "JFG_PHASE95_NATIVE_POLL_TRACE") != 0) {
     std::fputs("native boot setup failed: poll trace environment\n", stderr);
     return 3;
@@ -9677,7 +10105,7 @@ int run_child(const char *path, const unsigned retrace_target,
   std::free(poll_path);
   char *poll_hashes = nullptr;
   std::size_t poll_hashes_size = 0U;
-  if (_dupenv_s(&poll_hashes, &poll_hashes_size,
+  if (jfg::platform::dupenv_s(&poll_hashes, &poll_hashes_size,
                 "JFG_PHASE9_POLL_HASHES") != 0) {
     std::fputs("native boot setup failed: poll hash environment\n", stderr);
     return 3;
@@ -9705,7 +10133,7 @@ int run_child(const char *path, const unsigned retrace_target,
   }
   char *event_range = nullptr;
   std::size_t event_range_size = 0U;
-  if (_dupenv_s(&event_range, &event_range_size,
+  if (jfg::platform::dupenv_s(&event_range, &event_range_size,
                 "JFG_PHASE9_EVENT_TRACE_RANGE") != 0) {
     std::fputs("native boot setup failed: event trace environment\n", stderr);
     return 3;
@@ -9768,7 +10196,7 @@ int run_child(const char *path, const unsigned retrace_target,
   std::free(event_range);
   char *controller_return = nullptr;
   std::size_t controller_return_size = 0U;
-  if (_dupenv_s(&controller_return, &controller_return_size,
+  if (jfg::platform::dupenv_s(&controller_return, &controller_return_size,
                 "JFG_PHASE9_CONTROLLER_RETURN") != 0) {
     std::fputs("native boot setup failed: controller return environment\n", stderr);
     return 3;
@@ -9845,10 +10273,10 @@ int run_child(const char *path, const unsigned retrace_target,
           target_metadata.linked_vram + descriptors[index].target_offset);
     }
   }
-#if defined(_WIN32) && defined(JFG_PHASE8_LIVE_RUNTIME)
+#if defined(JFG_NATIVE_HOST) && defined(JFG_PHASE8_LIVE_RUNTIME)
   char hidden_validation[2]{};
   const bool diagnostic_hidden_window =
-      GetEnvironmentVariableA("JFG_DIAGNOSTIC_HIDDEN_WINDOW",hidden_validation,2U)==1U &&
+      jfg::platform::get_environment_variable("JFG_DIAGNOSTIC_HIDDEN_WINDOW",hidden_validation,2U)==1U &&
       hidden_validation[0]=='1';
   LiveRt64Window live_window(state, play_mode && !diagnostic_hidden_window);
   if (!initialize_live_renderer(state, live_window)) {
@@ -9891,7 +10319,7 @@ int run_child(const char *path, const unsigned retrace_target,
     state.mmio_trace->vi_next = 5000U + ((state.cpu_count - 5000U) / 500000U + 1U) * 500000U;
     char* guest_trace_path = nullptr;
     std::size_t guest_trace_path_size = 0U;
-    if (_dupenv_s(&guest_trace_path, &guest_trace_path_size, "JFG_PHASE9_GUEST_OS_CLOCK_TRACE") != 0)
+    if (jfg::platform::dupenv_s(&guest_trace_path, &guest_trace_path_size, "JFG_PHASE9_GUEST_OS_CLOCK_TRACE") != 0)
       return 3;
     if (guest_trace_path != nullptr && *guest_trace_path != '\0') {
       state.guest_clock_trace.open(guest_trace_path, std::ios::binary | std::ios::trunc);
@@ -9997,10 +10425,10 @@ int run_child(const char *path, const unsigned retrace_target,
       cop0_status_write(&context, 0x34000000U); // observed reference cold boot
     if (state.guest_os_probe) {
       state.guest_transport = std::make_unique<GuestThreadTransport<recomp_context>>(
-          [&state](std::uint32_t entry, recomp_context& cpu) {
-            const auto body = state.runtime->lookup_function_by_guest_address(entry);
-            if (!body.ok()) fail_closed_dispatch(state, "guest-os", "thread-entry-unavailable", entry);
-            invoke_generated(body.function, state.rdram, &cpu, state, entry);
+          [&state](std::uint32_t thread_entry, recomp_context& cpu) {
+            const auto body = state.runtime->lookup_function_by_guest_address(thread_entry);
+            if (!body.ok()) fail_closed_dispatch(state, "guest-os", "thread-entry-unavailable", thread_entry);
+            invoke_generated(body.function, state.rdram, &cpu, state, thread_entry);
           }, [](recomp_context& cpu) {
             cpu.f_odd = cpu.mips3_float_mode ? &cpu.f1.u32l : &cpu.f0.u32h;
             set_cop1_cs(cpu.fcr31);
@@ -10053,7 +10481,7 @@ bool reset_transfer_target(const std::vector<std::uint8_t> &rom,
   return true;
 }
 
-#if defined(_WIN32)
+#if defined(JFG_NATIVE_HOST)
 bool extract_canonical_ledger(const std::string &output,
                               std::string &ledger_line) {
   static const std::regex pattern(
@@ -10122,11 +10550,11 @@ bool extract_canonical_probe(const std::string &output,
 bool extract_original_os_probe(const std::string& output, unsigned target, std::string& line) {
   char* enabled = nullptr;
   std::size_t size = 0;
-  const bool opted_in = _dupenv_s(&enabled, &size, "JFG_PHASE9_GUEST_OS_PROBE") == 0 &&
+  const bool opted_in = jfg::platform::dupenv_s(&enabled, &size, "JFG_PHASE9_GUEST_OS_PROBE") == 0 &&
       enabled && std::strcmp(enabled, "1") == 0;
   std::free(enabled);
   char original_timing[2]{};
-  const auto timing_override = GetEnvironmentVariableA("JFG_ORIGINAL_TIMING",original_timing,2U);
+  const auto timing_override = jfg::platform::get_environment_variable("JFG_ORIGINAL_TIMING",original_timing,2U);
   const bool runtime_opted_in = timing_override == 1U ? original_timing[0]=='1' :
       JFG_ORIGINAL_TIMING_GENERATION == 1;
   if (!opted_in && !runtime_opted_in) return false;
@@ -10182,6 +10610,7 @@ bool extract_canonical_play_exit(const std::string &output,
   return true;
 }
 
+#if defined(_WIN32)
 std::wstring quote_argument(std::wstring_view value) {
   std::wstring quoted = L"\"";
   std::size_t slash_count = 0U;
@@ -10488,14 +10917,253 @@ int run_parent(const char *executable_path, const char *rom_path,
   DeleteFileW(stdout_path);
   return result;
 }
+#else
+// Linux supervisor. The parent validates the ROM, then runs this executable as
+// an isolated child whose stdout/stderr go to a private temporary file. The
+// parent accepts only the canonical result line the child prints, mirroring
+// the Windows process model. The child proves it was started by the parent by
+// reading a random token from an inherited memfd.
+bool parse_token(std::string_view text, std::array<std::uint8_t, 16U> &token) {
+  if (text.size() != token.size() * 2U)
+    return false;
+  for (std::size_t index = 0; index < token.size(); ++index) {
+    const auto digit = [](char value) -> int {
+      if (value >= '0' && value <= '9')
+        return value - '0';
+      if (value >= 'a' && value <= 'f')
+        return value - 'a' + 10;
+      return -1;
+    };
+    const int high = digit(text[index * 2U]);
+    const int low = digit(text[index * 2U + 1U]);
+    if (high < 0 || low < 0)
+      return false;
+    token[index] = static_cast<std::uint8_t>((high << 4) | low);
+  }
+  return true;
+}
+
+bool validate_child_capability(const char *token_text, const char *handle_text) {
+  std::array<std::uint8_t, 16U> token{};
+  if (token_text == nullptr || handle_text == nullptr ||
+      !parse_token(token_text, token))
+    return false;
+  char *end = nullptr;
+  const auto raw = std::strtoull(handle_text, &end, 16);
+  if (*handle_text == '\0' || *end != '\0' || raw == 0U ||
+      raw > static_cast<unsigned long long>((std::numeric_limits<int>::max)()))
+    return false;
+  const int marker = static_cast<int>(raw);
+  std::array<std::uint8_t, 16U> stored{};
+  if (::fcntl(marker, F_GETFD) < 0 ||
+      ::pread(marker, stored.data(), stored.size(), 0) !=
+          static_cast<ssize_t>(stored.size()))
+    return false;
+  return std::memcmp(stored.data(), token.data(), token.size()) == 0;
+}
+
+bool read_small_file(const int file, std::string &output) {
+  struct stat info{};
+  if (::fstat(file, &info) != 0 || info.st_size < 0 || info.st_size > 65536)
+    return false;
+  output.resize(static_cast<std::size_t>(info.st_size));
+  std::size_t done = 0U;
+  while (done < output.size()) {
+    const ssize_t count = ::pread(file, output.data() + done,
+                                  output.size() - done, static_cast<off_t>(done));
+    if (count <= 0)
+      return false;
+    done += static_cast<std::size_t>(count);
+  }
+  return true;
+}
+
+std::string token_text(const std::array<std::uint8_t, 16U> &token) {
+  constexpr char digits[] = "0123456789abcdef";
+  std::string result(token.size() * 2U, '0');
+  for (std::size_t index = 0; index < token.size(); ++index) {
+    result[index * 2U] = digits[token[index] >> 4U];
+    result[index * 2U + 1U] = digits[token[index] & 15U];
+  }
+  return result;
+}
+
+int run_parent(const char *executable_path, const char *rom_path,
+               unsigned timeout_ms, const unsigned retrace_target,
+               const unsigned poll_target, const bool play_mode) {
+  (void)executable_path;
+  std::vector<std::uint8_t> validated_rom;
+  if (!read_supported_rom(rom_path, validated_rom))
+    return 2;
+  std::uint32_t entry_target = 0U;
+  if (!reset_transfer_target(validated_rom, entry_target))
+    return 3;
+
+  char executable[4096]{};
+  const ssize_t executable_length =
+      ::readlink("/proc/self/exe", executable, sizeof(executable) - 1U);
+  if (executable_length <= 0)
+    return 3;
+
+  // Private capture file, unlinked immediately so it never outlives us.
+  const char *const temp_directory = std::getenv("TMPDIR");
+  std::string capture_path =
+      std::string(temp_directory != nullptr && *temp_directory != '\0'
+                      ? temp_directory
+                      : "/tmp") + "/jfg-native-XXXXXX";
+  const int output = ::mkstemp(capture_path.data());
+  if (output < 0)
+    return 3;
+  (void)::unlink(capture_path.c_str());
+  const int nul = ::open("/dev/null", O_RDONLY);
+  const int marker = static_cast<int>(::syscall(SYS_memfd_create, "jfg-marker", 0U));
+  std::array<std::uint8_t, 16U> token{};
+  int result = 3;
+  const auto cleanup = [&] {
+    if (nul >= 0) ::close(nul);
+    if (marker >= 0) ::close(marker);
+    ::close(output);
+  };
+  if (nul < 0 || marker < 0 ||
+      ::syscall(SYS_getrandom, token.data(), token.size(), 0U) !=
+          static_cast<long>(token.size()) ||
+      ::pwrite(marker, token.data(), token.size(), 0) !=
+          static_cast<ssize_t>(token.size())) {
+    cleanup();
+    return result;
+  }
+
+  std::vector<std::string> arguments{
+      std::string(executable, static_cast<std::size_t>(executable_length)),
+      "--_jfg-phase6-child", "--rom", rom_path};
+  if (play_mode) {
+    arguments.emplace_back("--play");
+  } else if (poll_target != 0U) {
+    arguments.emplace_back("--probe-polls");
+    arguments.emplace_back(std::to_string(poll_target));
+  } else {
+    arguments.emplace_back("--probe-retraces");
+    arguments.emplace_back(std::to_string(retrace_target));
+  }
+  arguments.emplace_back("--_jfg-phase6-token");
+  arguments.emplace_back(token_text(token));
+  arguments.emplace_back("--_jfg-phase6-marker");
+  char marker_text[16]{};
+  std::snprintf(marker_text, sizeof(marker_text), "%x", static_cast<unsigned>(marker));
+  arguments.emplace_back(marker_text);
+  std::vector<char *> argv;
+  for (std::string &argument : arguments)
+    argv.push_back(argument.data());
+  argv.push_back(nullptr);
+
+  std::fflush(stdout);
+  std::fflush(stderr);
+  const pid_t child = ::fork();
+  if (child < 0) {
+    cleanup();
+    return result;
+  }
+  if (child == 0) {
+    // Die with the parent so closing the launcher never leaves a game behind.
+    (void)::prctl(PR_SET_PDEATHSIG, SIGKILL);
+    (void)::dup2(nul, STDIN_FILENO);
+    (void)::dup2(output, STDOUT_FILENO);
+    (void)::dup2(output, STDERR_FILENO);
+    ::close(nul);
+    ::close(output);
+    // Recompiled MIPS calls are ordinary host calls and boot-time overlay
+    // initialisation is deep. The Windows build links with a 16 MiB stack;
+    // raise the soft limit so the main thread and the default stack of every
+    // guest-thread worker (glibc sizes it from RLIMIT_STACK) match.
+    struct rlimit stack{};
+    constexpr rlim_t kStackBytes = rlim_t{16U} * 1024U * 1024U;
+    if (::getrlimit(RLIMIT_STACK, &stack) == 0 && stack.rlim_cur != RLIM_INFINITY &&
+        stack.rlim_cur < kStackBytes) {
+      stack.rlim_cur = stack.rlim_max == RLIM_INFINITY || stack.rlim_max >= kStackBytes
+                           ? kStackBytes : stack.rlim_max;
+      (void)::setrlimit(RLIMIT_STACK, &stack);
+    }
+    ::execv(argv[0], argv.data());
+    ::_exit(127);
+  }
+
+  int status = 0;
+  bool timed_out = false;
+  const auto deadline = std::chrono::steady_clock::now() +
+                        std::chrono::milliseconds(timeout_ms);
+  for (;;) {
+    const pid_t waited = ::waitpid(child, &status, WNOHANG);
+    if (waited == child)
+      break;
+    if (waited < 0 && errno != EINTR) {
+      cleanup();
+      return result;
+    }
+    if (!play_mode && std::chrono::steady_clock::now() >= deadline) {
+      timed_out = true;
+      (void)::kill(child, SIGKILL);
+      (void)::waitpid(child, &status, 0);
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+
+  std::string child_output;
+  const bool exited = WIFEXITED(status);
+  const unsigned exit_code = exited ? static_cast<unsigned>(WEXITSTATUS(status)) : 0U;
+  if (timed_out) {
+    State state{};
+    ledger(state, "watchdog", "wall-clock", entry_target);
+    result = 4;
+  } else if (exited && (exit_code == 0U || exit_code == 4U) &&
+             read_small_file(output, child_output) &&
+             [&child_output, exit_code, retrace_target, poll_target, play_mode] {
+               std::string canonical_line;
+               const bool valid =
+                   exit_code == 0U
+                       ? (play_mode
+                              ? extract_canonical_play_exit(child_output, canonical_line)
+                          : poll_target != 0U
+                              ? extract_canonical_poll_probe(child_output, poll_target, canonical_line)
+                          : retrace_target == 3U
+                              ? extract_canonical_success(child_output, canonical_line)
+                              : (extract_canonical_probe(child_output, canonical_line) ||
+                                 extract_original_os_probe(child_output, retrace_target, canonical_line)))
+                       : extract_canonical_ledger(child_output, canonical_line);
+               if (!valid)
+                 return false;
+               child_output = std::move(canonical_line);
+               return true;
+             }()) {
+    std::fwrite(child_output.data(), 1U, child_output.size(), stdout);
+    result = static_cast<int>(exit_code);
+  } else {
+#if defined(JFG_PHASE8_LIVE_RUNTIME)
+    if (child_output.empty())
+      (void)read_small_file(output, child_output);
+    if (!child_output.empty())
+      std::fwrite(child_output.data(), 1U, child_output.size(), stderr);
+    std::fprintf(stderr, "native boot child rejected: exit=0x%08x\n",
+                 exited ? exit_code : 0xffffffffU);
 #endif
+    result = exited && exit_code == 2U ? 2 : 3;
+  }
+  char support_code[32]{};
+  std::snprintf(support_code, sizeof(support_code), "native_exit=0x%08x",
+                exited ? exit_code : 0xffffffffU);
+  jfg::support_event(support_code);
+  cleanup();
+  return result;
+}
+#endif
+#endif  // JFG_NATIVE_HOST
 
 int run(const char *executable_path, const char *rom_path, unsigned timeout_ms,
         bool child_mode, const char *child_token, const char *marker_handle,
         unsigned retrace_target, unsigned poll_target, bool play_mode) {
   jfg::support_event("native=boot");
   if (child_mode) {
-#if defined(_WIN32)
+#if defined(JFG_NATIVE_HOST)
     if (!validate_child_capability(child_token, marker_handle))
       return 3;
 #else
@@ -10503,7 +11171,7 @@ int run(const char *executable_path, const char *rom_path, unsigned timeout_ms,
 #endif
     return run_child(rom_path, retrace_target, poll_target, play_mode);
   }
-#if defined(_WIN32)
+#if defined(JFG_NATIVE_HOST)
   return run_parent(executable_path, rom_path, timeout_ms, retrace_target,
                     poll_target, play_mode);
 #else

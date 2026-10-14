@@ -616,3 +616,32 @@ target_include_directories(jfg_original_timing_fast_tests PRIVATE
 target_compile_features(jfg_original_timing_fast_tests PRIVATE cxx_std_20)
 jfg_set_project_warnings(jfg_original_timing_fast_tests)
 add_test(NAME jfg.original_timing_fast COMMAND jfg_original_timing_fast_tests)
+
+add_executable(jfg_platform_environment_tests platform_environment_tests.cpp)
+target_include_directories(jfg_platform_environment_tests PRIVATE "${PROJECT_SOURCE_DIR}/include")
+target_compile_features(jfg_platform_environment_tests PRIVATE cxx_std_20)
+jfg_set_project_warnings(jfg_platform_environment_tests)
+add_test(NAME jfg.platform_environment COMMAND jfg_platform_environment_tests)
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
+    # Proves the PROT_NONE + trap-flag mechanism the Linux MMIO monitor relies on.
+    add_executable(jfg_mmio_trap_posix_tests mmio_trap_posix_tests.cpp)
+    target_compile_features(jfg_mmio_trap_posix_tests PRIVATE cxx_std_20)
+    jfg_set_project_warnings(jfg_mmio_trap_posix_tests)
+    add_test(NAME jfg.mmio_trap_posix COMMAND jfg_mmio_trap_posix_tests)
+endif()
+
+if(NOT WIN32)
+    # Optional: needs SDL2 development headers (libsdl2-dev).
+    find_package(SDL2 QUIET)
+    if(TARGET SDL2::SDL2)
+        add_executable(jfg_sdl_input_mapping_tests sdl_input_mapping_tests.cpp)
+        target_include_directories(jfg_sdl_input_mapping_tests PRIVATE "${PROJECT_SOURCE_DIR}/include")
+        target_link_libraries(jfg_sdl_input_mapping_tests PRIVATE SDL2::SDL2 Threads::Threads)
+        target_compile_features(jfg_sdl_input_mapping_tests PRIVATE cxx_std_20)
+        jfg_set_project_warnings(jfg_sdl_input_mapping_tests)
+        add_test(NAME jfg.sdl_input_mapping COMMAND jfg_sdl_input_mapping_tests)
+    else()
+        message(STATUS "SDL2 development files not found; skipping the Linux input mapping test")
+    endif()
+endif()

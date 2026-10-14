@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Experimental Windows ROM-to-native build. All generated files stay local."""
+"""Experimental ROM-to-native build for Windows x64 and Linux x86-64. All generated files stay local."""
 from __future__ import annotations
 
 import argparse
@@ -7,13 +7,14 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import platform
 import re
 import shutil
 import subprocess
 import sys
 import time
 import uuid
-from build_paths import windows_cache, check_binary_path
+from build_paths import host_cache, check_binary_path
 from runtime_identity import write_identity
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -43,6 +44,8 @@ def find_cmake() -> str:
     found = shutil.which("cmake")
     if found:
         return found
+    if os.name != "nt":
+        raise ValueError("Install CMake 3.20 or newer (for example: sudo apt install cmake ninja-build).")
     base = Path(os.environ.get("ProgramFiles(x86)", "C:/Program Files (x86)"))
     vswhere = base / "Microsoft Visual Studio/Installer/vswhere.exe"
     if vswhere.is_file():
@@ -62,15 +65,17 @@ def main() -> int:
     parser.add_argument("--jobs", type=int, default=min(os.cpu_count() or 4, 8))
     parser.add_argument("--dependency-root", type=Path,
                         help="Optional existing pinned upstream source/tool cache")
-    parser.add_argument("--build-root", type=Path, help="Optional short writable Windows build-cache folder")
+    parser.add_argument("--build-root", type=Path, help="Optional short writable local build-cache folder")
     parser.add_argument("--play", action="store_true")
     parser.add_argument("--resume-native", type=Path,
                         help="Resume compilation in a local build whose ROM generation completed")
     parser.add_argument("--generation-timeout", type=int, default=3600,
                         help="Hard limit for the Linux subprocess group, in seconds")
     args = parser.parse_args()
-    if os.name != "nt" or sys.version_info < (3, 11):
-        parser.error("This prototype requires Windows x64 and Python 3.11 or newer.")
+    windows = os.name == "nt"
+    if sys.version_info < (3, 11) or not (windows or (sys.platform.startswith("linux") and
+                                                      platform.machine() in ("x86_64", "AMD64"))):
+        parser.error("This prototype requires Windows x64 or Linux x86-64, and Python 3.11 or newer.")
     if not 1 <= args.jobs <= 32:
         parser.error("--jobs must be between 1 and 32")
     if not 1 <= args.generation_timeout <= 7200:
@@ -78,10 +83,10 @@ def main() -> int:
     rom = args.rom.resolve()
     validate_rom(rom)  # Reject before downloads or build output.
     cmake = find_cmake()
-    for tool in ("git", "wsl"):
+    for tool in (("git", "wsl") if windows else ("git", "ninja", "timeout")):
         if not shutil.which(tool):
             raise ValueError(f"Required tool missing: {tool}")
-    cache = windows_cache(ROOT, args.build_root)
+    cache = host_cache(ROOT, args.build_root)
     deps = (args.dependency_root or cache / "d").resolve()
     if args.resume_native:
         workspace = args.resume_native.resolve()
@@ -98,7 +103,9 @@ def main() -> int:
     else:
         workspace = cache / "w" / uuid.uuid4().hex[:12]
         workspace.mkdir(parents=True, exist_ok=False)
-    build = check_binary_path(workspace / ("native" if args.resume_native and (workspace / "native").exists() else "n"))
+    build = workspace / ("native" if args.resume_native and (workspace / "native").exists() else "n")
+    if windows:
+        build = check_binary_path(build)
     print("Local build workspace: " + str(workspace), flush=True)
     status_file = workspace / "status.json"
     records: list[dict] = (json.loads(status_file.read_text()).get("steps", [])
@@ -159,15 +166,23 @@ def main() -> int:
                 run("submodules-" + entry["id"], ["git", "-c", "core.autocrlf=false", "-c", "core.longpaths=true", "-C", str(dest), "submodule", "update", "--init", "--recursive"])
 
     if not args.resume_native:
-        run("generate", ["wsl", "-d", args.distro, "--exec", "timeout", "--kill-after=3s",
-            str(args.generation_timeout) + "s", "python3",
-            wsl_path(ROOT / "scripts/generate_from_rom.py"), "--rom", wsl_path(rom),
-            "--workspace", wsl_path(workspace), "--dependency-root", wsl_path(deps),
-            "--jobs", str(args.jobs)])
+        if windows:
+            run("generate", ["wsl", "-d", args.distro, "--exec", "timeout", "--kill-after=3s",
+                str(args.generation_timeout) + "s", "python3",
+                wsl_path(ROOT / "scripts/generate_from_rom.py"), "--rom", wsl_path(rom),
+                "--workspace", wsl_path(workspace), "--dependency-root", wsl_path(deps),
+                "--jobs", str(args.jobs)])
+        else:
+            run("generate", ["timeout", "--kill-after=3s", str(args.generation_timeout) + "s",
+                sys.executable, str(ROOT / "scripts/generate_from_rom.py"), "--rom", str(rom),
+                "--workspace", str(workspace), "--dependency-root", str(deps),
+                "--jobs", str(args.jobs)])
     generated = workspace / "normalized"
-    run("configure", [cmake, "-S", str(ROOT), "-B", str(build),
-        "-G", "Visual Studio 17 2022", "-A", "x64", "-DBUILD_TESTING=OFF", "-DJFG_SUPPORT_SYMBOLS=ON",
-        "-DJFG_MSVC_GENERATED_COMPILE_JOBS=" + str(args.jobs),
+    generator = (["-G", "Visual Studio 17 2022", "-A", "x64", "-DJFG_SUPPORT_SYMBOLS=ON",
+                  "-DJFG_MSVC_GENERATED_COMPILE_JOBS=" + str(args.jobs)] if windows else
+                 ["-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release"])
+    run("configure", [cmake, "-S", str(ROOT), "-B", str(build)] + generator + [
+        "-DBUILD_TESTING=OFF",
         "-DJFG_ENABLE_GENERATED_CODE=ON", "-DJFG_BUILD_PHASE6_NATIVE_BOOT=ON",
         "-DJFG_BUILD_PHASE8_LIVE=ON", "-DJFG_ENABLE_RT64=ON",
         "-DJFG_GENERATED_ROOT=" + str(generated),
@@ -177,17 +192,22 @@ def main() -> int:
         "-DJFG_RT64_ROOT=" + str(deps / "rt64")])
     run("compile", [cmake, "--build", str(build), "--config", "Release",
         "--target", "jfg-native-boot", "--parallel", str(args.jobs)])
-    executable = build / "Release/jfg-native-boot.exe"
+    executable = build / ("Release/jfg-native-boot.exe" if windows else "jfg-native-boot")
     if not executable.is_file():
         raise RuntimeError("Build finished without the native executable.")
     (workspace / "status.json").write_text(json.dumps({"complete": True,
         "scope": "Compilation only; gameplay acceptance is separate",
         "rom_sha1": ROM_SHA1, "executable": str(executable), "steps": records}, indent=2) + "\n")
-    write_identity(executable, ROOT)
+    if windows:
+        write_identity(executable, ROOT)
     print("Built: " + str(executable), flush=True)
     print("Keep this build local. It contains code generated from your ROM.", flush=True)
     if args.play:
-        profile = Path(os.environ["LOCALAPPDATA"]) / "JFGRecomp/profiles/default"
+        if windows:
+            profile = Path(os.environ["LOCALAPPDATA"]) / "JFGRecomp/profiles/default"
+        else:
+            data_home = os.environ.get("XDG_DATA_HOME")
+            profile = (Path(data_home) if data_home else Path.home() / ".local/share") / "JFGRecomp/profiles/default"
         profile.mkdir(parents=True, exist_ok=True)
         environment = {k: v for k, v in os.environ.items() if not k.startswith("JFG_")}
         return subprocess.call([str(executable), "--rom", str(rom), "--save",

@@ -336,6 +336,12 @@ if(JFG_ENABLE_RT64)
             "${jfg_rt64_plume_patched_sources}")
     endif()
 
+    if(NOT WIN32)
+        # Linux uses the distribution's SDL2 (libsdl2-dev) for the window,
+        # input, gamepad and audio paths; Windows uses RT64's vendored copy.
+        find_package(SDL2 REQUIRED)
+    endif()
+
     add_library(jfg_rt64_renderer STATIC
         src/renderer/rt64_f3ddkr.cpp
         src/renderer/rt64_callbacks.cpp
@@ -352,16 +358,19 @@ if(JFG_ENABLE_RT64)
             "${jfg_rt64_root}/src/contrib/imgui"
             "${jfg_rt64_root}/src/contrib/mupen64plus-core/src/api"
             "${jfg_rt64_root}/src/contrib/nativefiledialog-extended/src/include"
-            "${jfg_rt64_root}/src/contrib/mupen64plus-win32-deps/SDL2-2.26.3/include"
             "${CMAKE_CURRENT_BINARY_DIR}/src"
     )
     if(WIN32)
         target_include_directories(jfg_rt64_renderer PRIVATE
+            "${jfg_rt64_root}/src/contrib/mupen64plus-win32-deps/SDL2-2.26.3/include"
             "${jfg_rt64_root}/src/contrib/dxc/inc")
         target_link_directories(jfg_rt64_renderer PUBLIC
             "${jfg_rt64_root}/src/contrib/mupen64plus-win32-deps/SDL2-2.26.3/lib/x64")
     endif()
     target_link_libraries(jfg_rt64_renderer PUBLIC jfg_runtime PRIVATE rt64)
+    if(NOT WIN32)
+        target_link_libraries(jfg_rt64_renderer PRIVATE SDL2::SDL2)
+    endif()
     target_compile_features(jfg_rt64_renderer PUBLIC cxx_std_20)
     target_compile_definitions(jfg_rt64_renderer PRIVATE
         RT_ENABLED=0
@@ -574,22 +583,29 @@ if(JFG_ENABLE_GENERATED_CODE)
                 "${jfg_phase8_private_audio_adapter_root}")
             target_include_directories(jfg-native-boot SYSTEM PRIVATE
                 "${jfg_phase8_private_audio_runtime_include}"
-                "${jfg_phase8_private_audio_runtime_root}/ultramodern/include"
-                "${jfg_rt64_root}/src/contrib/mupen64plus-win32-deps/SDL2-2.26.3/include")
+                "${jfg_phase8_private_audio_runtime_root}/ultramodern/include")
             target_compile_definitions(jfg-native-boot PRIVATE
                 JFG_PHASE8_LIVE_RUNTIME=1
                 SDL_MAIN_HANDLED=1)
-            target_link_directories(jfg-native-boot PRIVATE
-                "${jfg_rt64_root}/src/contrib/mupen64plus-win32-deps/SDL2-2.26.3/lib/x64")
-            target_link_libraries(jfg-native-boot PRIVATE
-                jfg_rt64_renderer SDL2 user32)
-            add_custom_command(TARGET jfg-native-boot POST_BUILD
-                COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                    "${jfg_rt64_root}/src/contrib/mupen64plus-win32-deps/SDL2-2.26.3/lib/x64/SDL2.dll"
-                    "${jfg_rt64_root}/src/contrib/dxc/bin/x64/dxcompiler.dll"
-                    "${jfg_rt64_root}/src/contrib/dxc/bin/x64/dxil.dll"
-                    "$<TARGET_FILE_DIR:jfg-native-boot>"
-                VERBATIM)
+            if(WIN32)
+                target_include_directories(jfg-native-boot SYSTEM PRIVATE
+                    "${jfg_rt64_root}/src/contrib/mupen64plus-win32-deps/SDL2-2.26.3/include")
+                target_link_directories(jfg-native-boot PRIVATE
+                    "${jfg_rt64_root}/src/contrib/mupen64plus-win32-deps/SDL2-2.26.3/lib/x64")
+                target_link_libraries(jfg-native-boot PRIVATE
+                    jfg_rt64_renderer SDL2 user32)
+                add_custom_command(TARGET jfg-native-boot POST_BUILD
+                    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                        "${jfg_rt64_root}/src/contrib/mupen64plus-win32-deps/SDL2-2.26.3/lib/x64/SDL2.dll"
+                        "${jfg_rt64_root}/src/contrib/dxc/bin/x64/dxcompiler.dll"
+                        "${jfg_rt64_root}/src/contrib/dxc/bin/x64/dxil.dll"
+                        "$<TARGET_FILE_DIR:jfg-native-boot>"
+                    VERBATIM)
+            else()
+                find_package(SDL2 REQUIRED)
+                target_link_libraries(jfg-native-boot PRIVATE
+                    jfg_rt64_renderer SDL2::SDL2 ${CMAKE_DL_LIBS} Threads::Threads)
+            endif()
             if(MSVC)
                 target_link_options(jfg-native-boot PRIVATE
                     "/MAP:${CMAKE_CURRENT_BINARY_DIR}/phase8-private-native-boot.map")

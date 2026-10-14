@@ -372,6 +372,8 @@ int main(int argc, char **argv) {
   const char *config = nullptr;
   const char *save = nullptr;
   const char *controller_pak = nullptr;
+  const char *child_token = nullptr;
+  const char *marker_handle = nullptr;
   bool child_mode = false;
   bool timeout_explicit = false;
   bool retrace_target_explicit = false;
@@ -380,6 +382,10 @@ int main(int argc, char **argv) {
   unsigned timeout = kDefaultWatchdogMs;
   unsigned retrace_target = 3U;
   unsigned poll_target = 0U;
+  if (argc == 2 && std::strcmp(argv[1], "--frontend-version") == 0) {
+    std::puts("jfg-frontend-1");
+    return 0;
+  }
   for (int index = 1; index < argc; ++index) {
     if (std::strcmp(argv[index], "--rom") == 0 && index + 1 < argc) {
       rom = argv[++index];
@@ -410,13 +416,20 @@ int main(int argc, char **argv) {
       continue;
     } else if (std::strcmp(argv[index], "--play") == 0) {
       play_mode = true;
+    } else if (std::strcmp(argv[index], "--_jfg-phase6-token") == 0 &&
+               index + 1 < argc) {
+      child_token = argv[++index];
+    } else if (std::strcmp(argv[index], "--_jfg-phase6-marker") == 0 &&
+               index + 1 < argc) {
+      marker_handle = argv[++index];
     } else {
       usage();
       return 64;
     }
   }
   if ((play_mode && (retrace_target_explicit || poll_target_explicit)) ||
-      (retrace_target_explicit && poll_target_explicit)) {
+      (retrace_target_explicit && poll_target_explicit) ||
+      (child_mode && (child_token == nullptr || marker_handle == nullptr))) {
     usage();
     return 64;
   }
@@ -433,7 +446,7 @@ int main(int argc, char **argv) {
     timeout = default_watchdog_for_retraces(
         poll_target_explicit ? poll_target : retrace_target);
   return jfg::boot::native::run(argv[0], profile.rom.c_str(), timeout,
-                                child_mode, nullptr, nullptr, retrace_target,
-                                poll_target, play_mode);
+                                child_mode, child_token, marker_handle,
+                                retrace_target, poll_target, play_mode);
 }
 #endif

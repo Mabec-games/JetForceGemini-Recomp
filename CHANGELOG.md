@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Added experimental Linux x86-64 support for the native runtime: POSIX guest
+  memory mapping and device-register trapping, an SDL2 window with keyboard,
+  mouse and gamepad input, a `fork`/`exec` process supervisor, and
+  `scripts/build_from_rom.py` for Linux. See [Linux support](docs/development/linux.md).
+  The Windows launcher and its companion tools are unchanged and Windows-only.
+
 ## 1.1.0 — 2026-10-09
 
 - Fixed the embedded game's aspect ratio. Gameplay stays in a centered 4:3

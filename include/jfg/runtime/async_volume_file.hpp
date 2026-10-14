@@ -1,5 +1,10 @@
 #pragma once
+#if defined(_WIN32)
 #include <windows.h>
+#else
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 #include <array>
 #include <chrono>
 #include <condition_variable>
@@ -34,6 +39,7 @@ public:
 private:
   void refresh() noexcept {
     try {
+#if defined(_WIN32)
       const HANDLE file = CreateFileW(path_.c_str(), GENERIC_READ,
           FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,
           FILE_ATTRIBUTE_NORMAL,nullptr);
@@ -41,6 +47,15 @@ private:
       std::array<char,129> buffer{}; DWORD count=0;
       const bool read=ReadFile(file,buffer.data(),static_cast<DWORD>(buffer.size()),&count,nullptr)!=0;
       CloseHandle(file); if (!read || count>128U) return;
+#else
+      const int file = ::open(path_.c_str(), O_RDONLY | O_CLOEXEC);
+      if (file < 0) return;
+      std::array<char,129> buffer{};
+      const ssize_t result = ::read(file, buffer.data(), buffer.size());
+      ::close(file);
+      if (result < 0 || result > 128) return;
+      const std::size_t count = static_cast<std::size_t>(result);
+#endif
       auto value=std::make_shared<const std::string>(buffer.data(),count);
       std::lock_guard lock(mutex_); latest_=std::move(value);
     } catch (...) {}

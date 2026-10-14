@@ -1,4 +1,4 @@
-"""Short, checkout-specific Windows build storage; no drive mapping or registry edits."""
+"""Short, checkout-specific build storage; no drive mapping or registry edits."""
 from __future__ import annotations
 import hashlib
 import os
@@ -31,3 +31,18 @@ def windows_cache(source: Path, override: Path | None = None) -> Path:
     # Leave room for a run ID, native build directory and upstream intermediates.
     check_binary_path(cache / 'w' / ('0' * 12) / 'n')
     return cache
+
+
+def linux_cache(source: Path, override: Path | None = None) -> Path:
+    """Per-checkout build cache under XDG_CACHE_HOME (or ~/.cache)."""
+    if override is None:
+        root = os.environ.get('XDG_CACHE_HOME')
+        base = (Path(root) if root else Path.home() / '.cache') / 'jfg/b'
+    else:
+        base = override
+    key = hashlib.sha256(str(source.resolve()).encode('utf-8')).hexdigest()[:12]
+    return base.resolve() / key
+
+
+def host_cache(source: Path, override: Path | None = None) -> Path:
+    return windows_cache(source, override) if os.name == 'nt' else linux_cache(source, override)

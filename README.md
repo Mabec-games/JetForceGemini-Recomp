@@ -3,6 +3,7 @@
 [![Build status](https://github.com/TK22-26/JetForceGemini-Recomp/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/TK22-26/JetForceGemini-Recomp/actions/workflows/ci.yml)
 
 A native PC recompilation of Jet Force Gemini for Windows x64.
+Experimental Linux x86-64 support is documented in [Linux support](docs/development/linux.md).
 **v1.1.0** includes a prebuilt game: extract the ZIP, import your supported
 North American ROM once, and click **Play**. No developer tools or compilation
 are required.

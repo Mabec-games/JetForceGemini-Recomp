@@ -1,4 +1,5 @@
 #include "jfg/runtime/snapshot_copy.hpp"
+#include "jfg/platform/native_window.hpp"
 #include "jfg/renderer/rt64_shell.hpp"
 #include "jfg/renderer/vi_presentation.hpp"
 
@@ -733,7 +734,16 @@ std::unique_ptr<Rt64Shell> Rt64Shell::create(
         impl->task_rdram = impl->task_rdram_copy;
 
         RT64::Application::Core core{};
+#if defined(_WIN32)
         core.window = static_cast<RenderWindow>(configuration.native_window);
+#else
+        // RT64's Linux RenderWindow is an Xlib {Display*, Window} pair.
+        const auto* const native = static_cast<const platform::NativeWindowHandle*>(
+            configuration.native_window);
+        core.window = RenderWindow{
+            static_cast<decltype(RenderWindow::display)>(native->display),
+            static_cast<decltype(RenderWindow::window)>(native->window)};
+#endif
         core.HEADER = impl->header.data();
         core.RDRAM = impl->rdram.data();
         core.DMEM = impl->dmem.data();
