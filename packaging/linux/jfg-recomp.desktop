@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Jet Force Gemini Recomp
+Comment=Native PC recompilation of Jet Force Gemini (bring your own ROM)
+Exec=AppRun
+Icon=jfg-recomp
+Categories=Game;
+Terminal=true

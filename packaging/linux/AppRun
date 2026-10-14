@@ -1,0 +1,137 @@
+#!/bin/bash
+# AppImage entry point. The image holds this repository's source and no game
+# data. On first launch it builds the game locally from the user's own ROM and
+# caches the result; later launches just start the game.
+set -u
+
+HERE="$(dirname "$(readlink -f "$0")")"
+SOURCE_IMAGE="$HERE/usr/share/jfg-recomp/src"
+SOURCE_ID="$(cat "$HERE/usr/share/jfg-recomp/source-id" 2>/dev/null || echo unknown)"
+DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}/JFGRecomp"
+CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}/jfg/appimage"
+WORK="$CACHE_HOME/$SOURCE_ID"
+SOURCE="$WORK/src"
+PROFILE="$DATA_HOME/profiles/default"
+ROM="$DATA_HOME/roms/jfg.us.z64"
+EXE_RECORD="$WORK/executable.path"
+ROM_SHA1="493ced9008dbe932d6e91179b68e8630cf23a023"
+
+usage() {
+  cat <<USAGE
+Jet Force Gemini Recomp (Linux)
+
+  JFG.AppImage                 start the game (first run builds it from your ROM)
+  JFG.AppImage --rom FILE      import FILE (US .z64) and build, then play
+  JFG.AppImage --rebuild       discard this version's build and build again
+  JFG.AppImage --build-only    build without starting the game
+  JFG.AppImage --version       print the source revision
+
+Saves and the imported ROM: $DATA_HOME
+Build cache (safe to delete): $CACHE_HOME
+USAGE
+}
+
+say() { printf '%s\n' "$*" >&2; }
+
+ask_rom() {
+  if command -v zenity >/dev/null 2>&1 && [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
+    zenity --file-selection --title="Select your Jet Force Gemini (US) .z64 ROM" \
+      --file-filter="N64 ROM | *.z64" 2>/dev/null && return
+  fi
+  if [ -t 0 ]; then
+    read -r -p "Path to your Jet Force Gemini (US) .z64 ROM: " path && printf '%s\n' "$path" && return
+  fi
+  return 1
+}
+
+import_rom() {
+  local candidate="$1"
+  if [ ! -f "$candidate" ] || [ "$(stat -c %s "$candidate")" != 33554432 ]; then
+    say "That is not the supported 32 MiB US big-endian .z64 ROM."; return 1
+  fi
+  if [ "$(sha1sum "$candidate" | cut -d' ' -f1)" != "$ROM_SHA1" ]; then
+    say "ROM checksum does not match the supported US revision (other regions, hacks and byte-swapped dumps are not supported)."
+    return 1
+  fi
+  mkdir -p "$(dirname "$ROM")" && cp -f -- "$candidate" "$ROM.tmp" && mv -f -- "$ROM.tmp" "$ROM"
+}
+
+preflight() {
+  local missing=() tool
+  for tool in git cmake ninja gcc g++ make python3 readelf mips-linux-gnu-as mips-linux-gnu-objcopy timeout; do
+    command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
+  done
+  local libs_missing=()
+  for lib in libSDL2-2.0.so.0 libvulkan.so.1 libX11.so.6; do
+    ldconfig -p 2>/dev/null | grep -q "$lib" || libs_missing+=("$lib")
+  done
+  python3 -c 'import venv, sys; sys.exit(sys.version_info < (3, 11))' 2>/dev/null \
+    || missing+=("python3 >= 3.11 with venv")
+  if [ ${#missing[@]} -ne 0 ] || [ ${#libs_missing[@]} -ne 0 ]; then
+    say "The first-run build needs tools that are not installed:"
+    [ ${#missing[@]} -ne 0 ] && say "  missing tools: ${missing[*]}"
+    [ ${#libs_missing[@]} -ne 0 ] && say "  missing libraries: ${libs_missing[*]}"
+    say ""
+    say "On Debian/Ubuntu:"
+    say "  sudo apt install build-essential gcc-multilib binutils-mips-linux-gnu python3-venv python3-pip pkg-config cmake ninja-build git wget libsdl2-dev libx11-dev libxrandr-dev libvulkan-dev libasound2-dev"
+    say "Other distributions: install the equivalents, then run this again."
+    return 1
+  fi
+}
+
+build() {
+  preflight || return 1
+  if [ ! -f "$ROM" ]; then say "No ROM imported yet."; return 1; fi
+  mkdir -p "$WORK"
+  if [ ! -f "$SOURCE/.complete" ]; then
+    rm -rf "$SOURCE"
+    mkdir -p "$SOURCE" && cp -a "$SOURCE_IMAGE/." "$SOURCE/" && touch "$SOURCE/.complete" || return 1
+  fi
+  say "Building the game from your ROM. This downloads dependencies and takes a while; it only happens once."
+  local log="$WORK/build.log" executable
+  if ! env -u LD_LIBRARY_PATH python3 "$SOURCE/scripts/build_from_rom.py" --rom "$ROM" \
+        --build-root "$WORK/b" 2>&1 | tee "$log"; then
+    say "Build failed. Full output: $log"; return 1
+  fi
+  executable="$(sed -n 's/^Built: //p' "$log" | tail -n 1)"
+  if [ -z "$executable" ] || [ ! -x "$executable" ]; then say "Build did not produce an executable. See $log"; return 1; fi
+  printf '%s\n' "$executable" > "$EXE_RECORD"
+}
+
+play() {
+  local executable
+  executable="$(cat "$EXE_RECORD")"
+  mkdir -p "$PROFILE"
+  # Drop any inherited JFG_* diagnostics so only the intended profile is used.
+  while IFS='=' read -r name _; do case "$name" in JFG_*) unset "$name";; esac; done < <(env)
+  exec "$executable" --rom "$ROM" --save "$PROFILE/jfg.flash" \
+    --controller-pak "$PROFILE/controller-1.pak" --play
+}
+
+rom_arg=""; rebuild=0; build_only=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --rom) shift; rom_arg="${1:-}";;
+    --rebuild) rebuild=1;;
+    --build-only) build_only=1;;
+    --version) echo "$SOURCE_ID"; exit 0;;
+    -h|--help) usage; exit 0;;
+    *) usage >&2; exit 64;;
+  esac
+  shift
+done
+
+[ "$rebuild" = 1 ] && rm -rf "$WORK"
+
+if [ -n "$rom_arg" ]; then
+  import_rom "$rom_arg" || exit 2
+elif [ ! -f "$ROM" ]; then
+  chosen="$(ask_rom)" || { say "No ROM selected. Run again with --rom FILE."; exit 2; }
+  import_rom "$chosen" || exit 2
+fi
+
+if [ ! -f "$EXE_RECORD" ] || [ ! -x "$(cat "$EXE_RECORD")" ]; then
+  build || exit 1
+fi
+[ "$build_only" = 1 ] && { say "Build complete."; exit 0; }
+play

@@ -46,6 +46,25 @@ build directly:
 jfg-native-boot --rom my-copy.z64 --save jfg.flash --controller-pak controller-1.pak --play
 ```
 
+## AppImage (bring your own ROM)
+
+`scripts/package_appimage.py` produces a single-file AppImage that contains this
+repository's source and a first-run wrapper, and **no ROM, assets or code
+generated from a ROM**. On first launch the wrapper asks for your ROM (a
+`zenity` dialog, a prompt, or `--rom FILE`), checks its SHA-1, copies it to
+`~/.local/share/JFGRecomp`, builds the game locally into `~/.cache/jfg/appimage`
+and starts it. Later launches start immediately.
+
+```sh
+python3 scripts/package_appimage.py --appimagetool /path/to/appimagetool
+./build/appimage/JFG-<revision>-x86_64.AppImage
+```
+
+The first run needs the host tools listed under *Requirements* plus network
+access to fetch the pinned dependencies, and takes several minutes. If a tool is
+missing the wrapper prints the exact install command. Options: `--rom FILE`,
+`--build-only`, `--rebuild`, `--version`.
+
 ## Controls
 
 - **Window:** F11 toggles fullscreen. The window keeps the console's 4:3
