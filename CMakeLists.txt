@@ -347,19 +347,31 @@ if(JFG_ENABLE_RT64)
         src/renderer/rt64_callbacks.cpp
         src/renderer/rt64_shell.cpp
     )
+    set(jfg_rt64_renderer_include_dirs
+        "${jfg_rt64_root}/src"
+        "${jfg_rt64_root}/src/contrib"
+        "${jfg_rt64_root}/src/contrib/plume"
+        "${jfg_rt64_root}/src/contrib/hlslpp/include"
+        "${jfg_rt64_root}/src/contrib/imgui"
+        "${jfg_rt64_root}/src/contrib/mupen64plus-core/src/api"
+        "${jfg_rt64_root}/src/contrib/nativefiledialog-extended/src/include")
     target_include_directories(jfg_rt64_renderer
         PUBLIC
             "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
         PRIVATE
-            "${jfg_rt64_root}/src"
-            "${jfg_rt64_root}/src/contrib"
-            "${jfg_rt64_root}/src/contrib/plume"
-            "${jfg_rt64_root}/src/contrib/hlslpp/include"
-            "${jfg_rt64_root}/src/contrib/imgui"
-            "${jfg_rt64_root}/src/contrib/mupen64plus-core/src/api"
-            "${jfg_rt64_root}/src/contrib/nativefiledialog-extended/src/include"
             "${CMAKE_CURRENT_BINARY_DIR}/src"
     )
+    if(MSVC)
+        target_include_directories(jfg_rt64_renderer PRIVATE
+            ${jfg_rt64_renderer_include_dirs})
+    else()
+        # GCC/Clang counterpart of the MSVC suppressions below: the pinned RT64
+        # and Plume headers use anonymous structs and shadowing constructor
+        # parameters. Treat them as system headers so -Wshadow/-Wpedantic/-Werror
+        # apply to project code only.
+        target_include_directories(jfg_rt64_renderer SYSTEM PRIVATE
+            ${jfg_rt64_renderer_include_dirs})
+    endif()
     if(WIN32)
         target_include_directories(jfg_rt64_renderer PRIVATE
             "${jfg_rt64_root}/src/contrib/mupen64plus-win32-deps/SDL2-2.26.3/include"
