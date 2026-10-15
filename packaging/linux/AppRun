@@ -58,6 +58,11 @@ import_rom() {
 
 preflight() {
   local missing=() tool
+  # samurai (Arch's "samu") is a drop-in ninja; CMake only needs a `ninja` executable.
+  if ! command -v ninja >/dev/null 2>&1 && command -v samu >/dev/null 2>&1; then
+    SHIM="$(mktemp -d)" && ln -s "$(command -v samu)" "$SHIM/ninja" && PATH="$SHIM:$PATH"
+    export PATH
+  fi
   for tool in git cmake ninja gcc g++ make python3 readelf mips-linux-gnu-as mips-linux-gnu-objcopy timeout; do
     command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
   done
@@ -74,6 +79,11 @@ preflight() {
     say ""
     say "On Debian/Ubuntu:"
     say "  sudo apt install build-essential gcc-multilib binutils-mips-linux-gnu python3-venv python3-pip pkg-config cmake ninja-build git wget libsdl2-dev libx11-dev libxrandr-dev libvulkan-dev libasound2-dev"
+    say "On Arch / CachyOS / Manjaro (enable the multilib repo for the lib32 packages):"
+    say "  sudo pacman -S --needed base-devel git cmake ninja python python-pip pkgconf wget sdl2 libx11 libxrandr vulkan-icd-loader vulkan-headers alsa-lib lib32-glibc lib32-gcc-libs"
+    say "  mips-linux-gnu-as is not in the official repos; install it from the AUR:"
+    say "  paru -S mips-linux-gnu-binutils      (or: yay -S mips-linux-gnu-binutils)"
+    say "  ('ninja' must be the real package named ninja; the 'samurai' package also works.)"
     say "Other distributions: install the equivalents, then run this again."
     return 1
   fi
