@@ -15,6 +15,8 @@ PROFILE="$DATA_HOME/profiles/default"
 ROM="$DATA_HOME/roms/jfg.us.z64"
 EXE_RECORD="$WORK/executable.path"
 ROM_SHA1="493ced9008dbe932d6e91179b68e8630cf23a023"
+LAUNCHER="$HERE/usr/bin/jfg-launcher"
+LAUNCHER_BACKGROUND="$HERE/usr/share/jfg-recomp/launcher/background.jpg"
 
 usage() {
   cat <<USAGE
@@ -118,12 +120,25 @@ play() {
     --controller-pak "$PROFILE/controller-1.pak" --play
 }
 
-rom_arg=""; rebuild=0; build_only=0
+# The first-run window: only while the game still needs to be built, only with
+# a desktop session, and only if the window can actually open on this system.
+# Otherwise the zenity/terminal flow below is used as before.
+launcher_available() {
+  [ "${JFG_LAUNCHER_CHILD:-}" != 1 ] && [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && [ -x "$LAUNCHER" ] \
+    && "$LAUNCHER" --probe >/dev/null 2>&1
+}
+
+needs_build() {
+  [ ! -f "$ROM" ] || [ ! -f "$EXE_RECORD" ] || [ ! -x "$(cat "$EXE_RECORD")" ]
+}
+
+rom_arg=""; rebuild=0; build_only=0; check_tools=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --rom) shift; rom_arg="${1:-}";;
     --rebuild) rebuild=1;;
     --build-only) build_only=1;;
+    --check-tools) check_tools=1;;
     --version) echo "$SOURCE_ID"; exit 0;;
     -h|--help) usage; exit 0;;
     *) usage >&2; exit 64;;
@@ -131,7 +146,17 @@ while [ $# -gt 0 ]; do
   shift
 done
 
+if [ "$check_tools" = 1 ]; then preflight 2>&1; exit $?; fi
+
 [ "$rebuild" = 1 ] && rm -rf "$WORK"
+
+if [ -z "$rom_arg" ] && needs_build && launcher_available; then
+  # The window imports the ROM and runs "AppRun --build-only"; exit 0 means ready.
+  "$LAUNCHER" --apprun "$HERE/AppRun" --rom-store "$ROM" --rom-sha1 "$ROM_SHA1" \
+    --background "$LAUNCHER_BACKGROUND" --icon "$HERE/jfg-recomp.png" --build-log "$WORK/build.log" || exit 1
+  [ "$build_only" = 1 ] && exit 0
+  play
+fi
 
 if [ -n "$rom_arg" ]; then
   import_rom "$rom_arg" || exit 2

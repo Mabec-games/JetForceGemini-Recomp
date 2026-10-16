@@ -19,6 +19,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGING = ROOT / "packaging/linux"
+LAUNCHER = PACKAGING / "launcher"
 # Files that are never needed to build the game from a ROM.
 EXCLUDED_PREFIXES = (".github/", "docs/images/", "evidence/", "launcher/windows/")
 
@@ -43,6 +44,16 @@ def make_icon(destination: Path) -> None:
     if best is None:
         raise ValueError("The application icon has no PNG frame.")
     destination.write_bytes(best[1])
+
+
+def build_launcher(destination: Path) -> None:
+    """Compile the first-run window against the system GTK 3 (no game data involved)."""
+    flags = subprocess.check_output(["pkg-config", "--cflags", "--libs", "gtk+-3.0"], text=True).split()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    # gnu11 keeps the binary off glibc 2.38-only C23 symbols such as __isoc23_strtol.
+    subprocess.run([os.environ.get("CC", "cc"), "-std=gnu11", "-O2", "-s", "-Wall", "-Wextra",
+                    "-Wno-deprecated-declarations", str(LAUNCHER / "jfg-launcher.c"), "-o", str(destination),
+                    *flags], check=True)
 
 
 def main() -> int:
@@ -83,6 +94,10 @@ def main() -> int:
     (appdir / "AppRun").chmod((appdir / "AppRun").stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     shutil.copy2(PACKAGING / "jfg-recomp.desktop", appdir / "jfg-recomp.desktop")
     make_icon(appdir / "jfg-recomp.png")
+    build_launcher(appdir / "usr/bin/jfg-launcher")
+    background = appdir / "usr/share/jfg-recomp/launcher/background.jpg"
+    background.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(LAUNCHER / "background.jpg", background)
     print("AppDir ready: " + str(appdir))
 
     tool = args.appimagetool or os.environ.get("APPIMAGETOOL") or shutil.which("appimagetool")
