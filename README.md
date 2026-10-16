@@ -1,3 +1,62 @@
+# Mabecs Jet Force Gemini Recomp (Linux)
+
+![Jet Force Gemini running natively on Linux](docs/images/mabec-gameplay.jpg)
+
+An unofficial Linux edition of [Jet Force Gemini Recomp](https://github.com/TK22-26/JetForceGemini-Recomp)
+by TK22-26 and the JFG Recomp contributors. Double-click the AppImage, choose your
+Jet Force Gemini (USA) ROM, and the game is built on your computer and starts by
+itself. Later launches go straight to the game.
+
+![The first-run launcher building the game](docs/images/mabec-launcher.jpg)
+
+## Download: choose one
+
+| | **Standard** ([JFG-Linux-Ver1](https://github.com/Mabec-games/JetForceGemini-Recomp/releases/tag/JFG-Linux-Ver1)) | **Offline** ([JFG-Linux-Ver2](https://github.com/Mabec-games/JetForceGemini-Recomp/releases/tag/JFG-Linux-Ver2)) |
+|---|---|---|
+| AppImage size | 3.7 MB | 144 MB |
+| Downloaded during the first build | about 4 GB | about 6 MB (the IDO compiler and the decompilation) |
+| First build takes | an hour or more, depending on your connection | about 15–30 minutes |
+| Good for | fast, reliable internet | slow or unreliable internet |
+
+Both build the same game and use the same saves.
+
+```
+chmod +x JFG-Linux-mabec*.appimage
+./JFG-Linux-mabec-offline.appimage      # or ./JFG-Linux-mabec.appimage
+```
+
+## You need
+
+- **Your own Jet Force Gemini (USA) `.z64` ROM.** The launcher checks it.
+- **Common build tools.** If any are missing, the launcher lists them with the
+  install command for your distribution.
+- **Python 3.11–3.14** for the offline edition's Python packages to come from the
+  AppImage (other versions download them).
+
+## What's different from upstream
+
+- A first-run launcher window: choose your ROM, see progress, and get readable
+  errors with **Try again**.
+- Fixes the Linux build failing on GCC (reported upstream as
+  [issue #15](https://github.com/TK22-26/JetForceGemini-Recomp/issues/15)).
+- Stalled downloads stop after 60 seconds instead of hanging, and downloads try
+  IPv4 first, for routers that never answer IPv6 lookups.
+- Includes [NoahVl's Linux AppImage improvements](https://github.com/NoahVl/JetForceGemini-Recomp/tree/claude/linux-appimage)
+  (GTK 3 requirement check, first compiler errors on a failed build).
+- Window title: "Mabecs Jet Force Gemini Recomp".
+
+No ROM, game data or code generated from a ROM is included in this repository or
+its releases. Two things are never bundled and are downloaded on first launch:
+IDO, the original N64 compiler, which is proprietary, and the Jet Force Gemini
+decompilation, which is reconstructed game code without a license. Everything the
+offline edition bundles is open source; its license files are in the AppImage
+under `usr/share/jfg-recomp/offline/licenses`. Not affiliated with or endorsed by
+the upstream project, Rare or Nintendo.
+
+---
+
+*The original project's README follows.*
+
 # Jet Force Gemini Recomp
 
 [![Build status](https://github.com/TK22-26/JetForceGemini-Recomp/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/TK22-26/JetForceGemini-Recomp/actions/workflows/ci.yml)
