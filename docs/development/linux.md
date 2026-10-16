@@ -21,7 +21,7 @@ same save format as Windows. Only the host layer differs.
 ```sh
 sudo apt install build-essential gcc-multilib binutils-mips-linux-gnu \
   python3-venv python3-pip pkg-config cmake ninja-build git wget \
-  libsdl2-dev libx11-dev libxrandr-dev libvulkan-dev libasound2-dev
+  libsdl2-dev libx11-dev libxrandr-dev libvulkan-dev libasound2-dev libgtk-3-dev
 ```
 
 ## Build and play

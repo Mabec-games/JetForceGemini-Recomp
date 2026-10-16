@@ -184,7 +184,7 @@ int main() {
     std::vector<std::byte> rendered = submitted;
     std::vector<std::byte> live = submitted;
     const std::array<jfg::Rt64RdramRange, 2U> ranges = {{{2U, 5U}, {8U, 12U}}};
-    rendered[2U ^ 3U] = std::byte{0xFA};
+    rendered[3U ^ 2U] = std::byte{0xFA};
     rendered[4U ^ 3U] = std::byte{0xFB};
     rendered[8U ^ 3U] = std::byte{0xFC};
     rendered[20U] = std::byte{0xFF}; // Not a device-owned image byte.
@@ -197,7 +197,7 @@ int main() {
     live[9U ^ 3U] = std::byte{0};
     require(jfg::commit_rt64_rdram_ranges(submitted, rendered, live, ranges) ==
         jfg::Rt64ShellError::none);
-    require(live[2U ^ 3U] == std::byte{0xFA});
+    require(live[3U ^ 2U] == std::byte{0xFA});
     require(live[4U ^ 3U] == std::byte{0xFB});
     require(live[8U ^ 3U] == std::byte{0xFC});
     require(live[20U] == std::byte{0});
