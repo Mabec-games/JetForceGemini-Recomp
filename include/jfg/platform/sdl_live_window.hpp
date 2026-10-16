@@ -180,7 +180,7 @@ private:
         SDL_SetHint(SDL_HINT_MOUSE_RELATIVE_MODE_WARP, "0");
         SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
         if (init_sdl_subsystem(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
-            window_ = SDL_CreateWindow("Jet Force Gemini Recomp",
+            window_ = SDL_CreateWindow("Mabecs Jet Force Gemini Recomp",
                 SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 640, 480,
                 SDL_WINDOW_RESIZABLE | (visible ? SDL_WINDOW_SHOWN : SDL_WINDOW_HIDDEN));
         }

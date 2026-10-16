@@ -18,7 +18,7 @@ ROM_SHA1="493ced9008dbe932d6e91179b68e8630cf23a023"
 
 usage() {
   cat <<USAGE
-Jet Force Gemini Recomp (Linux)
+Mabecs Jet Force Gemini Recomp (Linux)
 
   JFG.AppImage                 start the game (first run builds it from your ROM)
   JFG.AppImage --rom FILE      import FILE (US .z64) and build, then play
