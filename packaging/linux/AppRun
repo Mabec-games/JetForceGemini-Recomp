@@ -74,7 +74,7 @@ preflight() {
     missing+=("curl (or wget)")
   fi
   local libs_missing=()
-  for lib in libSDL2-2.0.so.0 libvulkan.so.1 libX11.so.6; do
+  for lib in libSDL2-2.0.so.0 libvulkan.so.1 libX11.so.6 libgtk-3.so.0; do
     ldconfig -p 2>/dev/null | grep -q "$lib" || libs_missing+=("$lib")
   done
   python3 -c 'import venv, sys; sys.exit(sys.version_info < (3, 11))' 2>/dev/null \
@@ -85,9 +85,9 @@ preflight() {
     [ ${#libs_missing[@]} -ne 0 ] && say "  missing libraries: ${libs_missing[*]}"
     say ""
     say "On Debian/Ubuntu:"
-    say "  sudo apt install build-essential gcc-multilib binutils-mips-linux-gnu python3-venv python3-pip pkg-config cmake ninja-build git wget libsdl2-dev libx11-dev libxrandr-dev libvulkan-dev libasound2-dev"
+    say "  sudo apt install build-essential gcc-multilib binutils-mips-linux-gnu python3-venv python3-pip pkg-config cmake ninja-build git wget libsdl2-dev libx11-dev libxrandr-dev libvulkan-dev libasound2-dev libgtk-3-dev"
     say "On Arch / CachyOS / Manjaro (enable the multilib repo for the lib32 packages):"
-    say "  sudo pacman -S --needed base-devel git cmake ninja python python-pip pkgconf wget sdl2 libx11 libxrandr vulkan-icd-loader vulkan-headers alsa-lib lib32-glibc lib32-gcc-libs"
+    say "  sudo pacman -S --needed base-devel git cmake ninja python python-pip pkgconf wget sdl2 libx11 libxrandr vulkan-icd-loader vulkan-headers alsa-lib gtk3 lib32-glibc lib32-gcc-libs"
     say "  mips-linux-gnu-as is not in the official repos; install it from the AUR:"
     say "  paru -S mips-linux-gnu-binutils      (or: yay -S mips-linux-gnu-binutils)"
     say "  ('ninja' must be the real package named ninja; the 'samurai' package also works.)"
@@ -192,7 +192,7 @@ build() {
   fi
   local log="$WORK/build.log" executable
   if [ -d "$OFFLINE/deps" ]; then
-    say "Building the game from your ROM. Everything needed is included except one 4.8 MB download; this takes a while and only happens once."
+    say "Building the game from your ROM. Everything needed is included except two small downloads (about 7 MB); this takes a while and only happens once."
   else
     say "Building the game from your ROM. This downloads dependencies and takes a while; it only happens once."
   fi
@@ -202,9 +202,20 @@ build() {
   export GIT_HTTP_LOW_SPEED_TIME="${GIT_HTTP_LOW_SPEED_TIME:-60}"
   # Not in a pipeline: prepare_offline exports the git and pip settings.
   prepare_offline > >(tee "$log") 2>&1 || { say "Build failed. Full output: $log"; return 1; }
-  if ! env -u LD_LIBRARY_PATH python3 "$SOURCE/scripts/build_from_rom.py" --rom "$ROM" \
-        --build-root "$WORK/b" 2>&1 | tee -a "$log"; then
-    say "Build failed. Full output: $log"; return 1
+  env -u LD_LIBRARY_PATH python3 "$SOURCE/scripts/build_from_rom.py" --rom "$ROM" \
+      --build-root "$WORK/b" 2>&1 | tee -a "$log"
+  if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+    local step_log
+    step_log="$(sed -n 's/.*Local diagnostic log: //p' "$log" | tail -n 1)"
+    if [ -n "$step_log" ] && [ -f "$step_log" ]; then
+      say ""
+      say "First errors from $step_log:"
+      grep -n -m 25 -E 'error:|Error|FAILED:|undefined reference' "$step_log" | cut -c1-400 >&2
+      say ""
+    fi
+    say "Build failed. Full output: $log"
+    say "When reporting this, include the error lines above and the output of: gcc --version"
+    return 1
   fi
   executable="$(sed -n 's/^Built: //p' "$log" | tail -n 1)"
   if [ -z "$executable" ] || [ ! -x "$executable" ]; then say "Build did not produce an executable. See $log"; return 1; fi
