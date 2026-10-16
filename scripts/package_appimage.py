@@ -62,6 +62,9 @@ def main() -> int:
     parser.add_argument("--appimagetool", help="Path to appimagetool (default: $APPIMAGETOOL or PATH)")
     parser.add_argument("--allow-dirty", action="store_true",
                         help="Package even if the working tree has uncommitted changes")
+    parser.add_argument("--offline-bundle", type=Path,
+                        help="Output of scripts/make_offline_bundle.py; makes the offline edition, whose first "
+                             "build downloads only IDO")
     args = parser.parse_args()
 
     if git("status", "--porcelain").strip() and not args.allow_dirty:
@@ -98,6 +101,11 @@ def main() -> int:
     background = appdir / "usr/share/jfg-recomp/launcher/background.jpg"
     background.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(LAUNCHER / "background.jpg", background)
+    if args.offline_bundle:
+        bundle = args.offline_bundle.resolve()
+        if not (bundle / "manifest.json").is_file():
+            raise ValueError(f"{bundle} is not an offline bundle (no manifest.json).")
+        shutil.copytree(bundle, appdir / "usr/share/jfg-recomp/offline", symlinks=True)
     print("AppDir ready: " + str(appdir))
 
     tool = args.appimagetool or os.environ.get("APPIMAGETOOL") or shutil.which("appimagetool")
@@ -106,7 +114,8 @@ def main() -> int:
               "make it executable and rerun with --appimagetool PATH. You can also test the\n"
               "AppDir directly: " + str(appdir / "AppRun"))
         return 0
-    image = output / f"JFG-{revision}-x86_64.AppImage"
+    edition = "-offline" if args.offline_bundle else ""
+    image = output / f"JFG-{revision}{edition}-x86_64.AppImage"
     environment = dict(os.environ, ARCH="x86_64")
     # --appimage-extract-and-run lets appimagetool itself run without FUSE.
     subprocess.run([tool, "--appimage-extract-and-run", str(appdir), str(image)],

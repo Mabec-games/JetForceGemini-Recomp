@@ -17,6 +17,8 @@ EXE_RECORD="$WORK/executable.path"
 ROM_SHA1="493ced9008dbe932d6e91179b68e8630cf23a023"
 LAUNCHER="$HERE/usr/bin/jfg-launcher"
 LAUNCHER_BACKGROUND="$HERE/usr/share/jfg-recomp/launcher/background.jpg"
+# Present only in the offline edition (scripts/make_offline_bundle.py).
+OFFLINE="$HERE/usr/share/jfg-recomp/offline"
 
 usage() {
   cat <<USAGE
@@ -68,6 +70,9 @@ preflight() {
   for tool in git cmake ninja gcc g++ make python3 readelf mips-linux-gnu-as mips-linux-gnu-objcopy timeout; do
     command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
   done
+  if [ -d "$OFFLINE/deps" ] && ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+    missing+=("curl (or wget)")
+  fi
   local libs_missing=()
   for lib in libSDL2-2.0.so.0 libvulkan.so.1 libX11.so.6; do
     ldconfig -p 2>/dev/null | grep -q "$lib" || libs_missing+=("$lib")
@@ -91,6 +96,92 @@ preflight() {
   fi
 }
 
+git_config_count=0
+add_git_config() {
+  export "GIT_CONFIG_KEY_$git_config_count=$1" "GIT_CONFIG_VALUE_$git_config_count=$2"
+  git_config_count=$((git_config_count + 1))
+  export GIT_CONFIG_COUNT=$git_config_count
+}
+
+download() { # URL FILE
+  # Some home routers never answer IPv6 (AAAA) lookups, so a normal attempt
+  # waits for the full timeout. Try IPv4 first; fall back to the default
+  # (which includes IPv6) for IPv6-only connections.
+  if command -v curl >/dev/null 2>&1; then
+    curl -4 -fsSL --connect-timeout 20 --speed-limit 1024 --speed-time 30 -o "$2" "$1" \
+      || curl -fsSL --connect-timeout 20 --speed-limit 1024 --speed-time 30 -o "$2" "$1"
+  else
+    wget -4 -q --timeout=30 -O "$2" "$1" || wget -q --timeout=30 -O "$2" "$1"
+  fi
+}
+
+# Offline edition: the open-source dependencies ship inside the AppImage.
+# Restore them into the build cache, then point git and pip at the local
+# copies so that the build downloads nothing except IDO, the original N64
+# compiler, which is proprietary and therefore never bundled.
+prepare_offline() {
+  [ -d "$OFFLINE/deps" ] || return 0
+  local key deps marker tools repo url path ido_dir ido_url ido_sha tarball attempt python_version
+  key="$(python3 -c 'import hashlib, sys; from pathlib import Path
+print(hashlib.sha256(str(Path(sys.argv[1]).resolve()).encode()).hexdigest()[:12])' "$SOURCE")" || return 1
+  deps="$WORK/b/$key/d"   # Where build_from_rom.py looks for its dependencies.
+  tools="$deps/Jet-Force-Gemini/tools"
+  marker="$deps/.offline-$SOURCE_ID"
+  add_git_config protocol.file.allow always
+  add_git_config uploadpack.allowAnySHA1InWant true
+  while IFS=$'\t' read -r url path; do
+    [ -n "$url" ] && add_git_config "url.$deps/$path.insteadOf" "$url"
+  done < "$OFFLINE/git-redirects.tsv"
+
+  if [ ! -f "$marker" ]; then
+    echo "unpack-offline"; echo "JFG-SUPPORT setup_step=unpack-offline"
+    rm -rf "$deps" && mkdir -p "$deps" && cp -a "$OFFLINE/deps/." "$deps/" || return 1
+    for repo in "$deps"/*/; do
+      git -C "$repo" reset -q --hard && git -C "$repo" submodule --quiet update --init --recursive --force \
+        || { say "Unpacking the bundled dependencies failed in $repo"; return 1; }
+    done
+    mkdir -p "$tools/objdiff" && cp "$OFFLINE/objdiff/objdiff-cli" "$tools/objdiff/" || return 1
+    gcc -I "$tools" -Wall -O2 -s -std=c99 -o "$tools/n64crc" "$tools/n64crc.c" -lm \
+      || { say "Building n64crc failed"; return 1; }
+    touch "$marker"
+  fi
+
+  ido_dir="$tools/ido-recomp/linux"
+  if [ ! -x "$ido_dir/cc" ]; then
+    echo "download-ido"; echo "JFG-SUPPORT setup_step=download-ido"
+    read -r ido_url ido_sha < <(python3 -c 'import json, sys; d = json.load(open(sys.argv[1]))
+print(d["url"], d["sha256"])' "$OFFLINE/ido.json") || return 1
+    tarball="$WORK/ido.tar.gz"
+    for attempt in 1 2 3 4 5; do
+      if download "$ido_url" "$tarball" && [ "$(sha256sum "$tarball" | cut -d' ' -f1)" = "$ido_sha" ]; then
+        break
+      fi
+      rm -f "$tarball"
+      say "Downloading IDO did not work (attempt $attempt of 5)."
+      [ "$attempt" = 5 ] || sleep 5
+    done
+    if [ ! -f "$tarball" ]; then
+      say "IDO download failed: the 4.8 MB IDO compiler could not be downloaded from $ido_url. Check your internet connection and try again."
+      return 1
+    fi
+    # Extract next to the target and move it into place only when complete, so
+    # an interrupted run never leaves a partial compiler that looks installed.
+    rm -rf "$ido_dir.partial" && mkdir -p "$ido_dir.partial" \
+      && tar --no-same-owner -xzf "$tarball" -C "$ido_dir.partial" \
+      && rm -rf "$ido_dir" && mv "$ido_dir.partial" "$ido_dir" && rm -f "$tarball" \
+      || { say "Unpacking IDO failed"; return 1; }
+  fi
+
+  # Python packages come from the bundled wheels. For a Python version they
+  # were not prepared for, still prefer them but allow the package index.
+  export PIP_FIND_LINKS="$OFFLINE/wheels" PIP_DISABLE_PIP_VERSION_CHECK=1
+  python_version="$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+  if python3 -c 'import json, sys; sys.exit(sys.argv[2] not in json.load(open(sys.argv[1]))["pythons"])' \
+       "$OFFLINE/manifest.json" "$python_version"; then
+    export PIP_NO_INDEX=1
+  fi
+}
+
 build() {
   preflight || return 1
   if [ ! -f "$ROM" ]; then say "No ROM imported yet."; return 1; fi
@@ -99,14 +190,20 @@ build() {
     rm -rf "$SOURCE"
     mkdir -p "$SOURCE" && cp -a "$SOURCE_IMAGE/." "$SOURCE/" && touch "$SOURCE/.complete" || return 1
   fi
-  say "Building the game from your ROM. This downloads dependencies and takes a while; it only happens once."
   local log="$WORK/build.log" executable
+  if [ -d "$OFFLINE/deps" ]; then
+    say "Building the game from your ROM. Everything needed is included except one 4.8 MB download; this takes a while and only happens once."
+  else
+    say "Building the game from your ROM. This downloads dependencies and takes a while; it only happens once."
+  fi
   # Git waits forever on a stalled HTTPS download. Give up after 60 seconds
   # below 1 KiB/s so the user sees an error and can retry instead of a hang.
   export GIT_HTTP_LOW_SPEED_LIMIT="${GIT_HTTP_LOW_SPEED_LIMIT:-1024}"
   export GIT_HTTP_LOW_SPEED_TIME="${GIT_HTTP_LOW_SPEED_TIME:-60}"
+  # Not in a pipeline: prepare_offline exports the git and pip settings.
+  prepare_offline > >(tee "$log") 2>&1 || { say "Build failed. Full output: $log"; return 1; }
   if ! env -u LD_LIBRARY_PATH python3 "$SOURCE/scripts/build_from_rom.py" --rom "$ROM" \
-        --build-root "$WORK/b" 2>&1 | tee "$log"; then
+        --build-root "$WORK/b" 2>&1 | tee -a "$log"; then
     say "Build failed. Full output: $log"; return 1
   fi
   executable="$(sed -n 's/^Built: //p' "$log" | tail -n 1)"
@@ -156,8 +253,11 @@ if [ "$check_tools" = 1 ]; then preflight 2>&1; exit $?; fi
 
 if [ -z "$rom_arg" ] && needs_build && launcher_available; then
   # The window imports the ROM and runs "AppRun --build-only"; exit 0 means ready.
+  launcher_options=()
+  [ -d "$OFFLINE/deps" ] && launcher_options+=(--offline)
   "$LAUNCHER" --apprun "$HERE/AppRun" --rom-store "$ROM" --rom-sha1 "$ROM_SHA1" \
-    --background "$LAUNCHER_BACKGROUND" --icon "$HERE/jfg-recomp.png" --build-log "$WORK/build.log" || exit 1
+    --background "$LAUNCHER_BACKGROUND" --icon "$HERE/jfg-recomp.png" --build-log "$WORK/build.log" \
+    "${launcher_options[@]}" || exit 1
   [ "$build_only" = 1 ] && exit 0
   play
 fi

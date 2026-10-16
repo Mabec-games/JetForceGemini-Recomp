@@ -30,6 +30,8 @@ typedef struct {
 } Step;
 
 static const Step kSteps[] = {
+  {"unpack-offline", "Unpacking the bundled dependencies", 40},
+  {"download-ido", "Downloading the IDO compiler (4.8 MB)", 15},
   {"clone-jfg-decomp", "Downloading the Jet Force Gemini decompilation", 120},
   {"pin-jfg-decomp", "Checking out the decompilation", 1},
   {"clone-n64recomp", "Downloading N64Recomp", 5},
@@ -56,6 +58,7 @@ typedef struct {
   char *background_path;
   char *icon_path;
   char *build_log;
+  gboolean offline;
 
   /* Widgets. */
   GtkWidget *window;
@@ -277,13 +280,24 @@ static void cancel_build(gboolean quit) {
   g_timeout_add_seconds(5, force_kill, NULL);
 }
 
+/* The offline edition skips the downloads, so they must not pace the bar. */
+static double step_weight(int i) {
+  const char *id = kSteps[i].id;
+  if (app.offline && (g_str_has_prefix(id, "clone-") || g_str_has_prefix(id, "pin-") ||
+                      g_str_has_prefix(id, "submodules-")))
+    return 1;
+  if (!app.offline && (strcmp(id, "unpack-offline") == 0 || strcmp(id, "download-ido") == 0)) return 1;
+  if (app.offline && strcmp(id, "generate") == 0) return 300; /* No downloads inside it either. */
+  return kSteps[i].weight;
+}
+
 static double overall_fraction(void) {
   double total = 0, done = 0;
   for (int i = 0; i < STEP_COUNT; i++) {
-    total += kSteps[i].weight;
-    if (i < app.step) done += kSteps[i].weight;
+    total += step_weight(i);
+    if (i < app.step) done += step_weight(i);
   }
-  if (app.step >= 0 && app.step < STEP_COUNT) done += kSteps[app.step].weight * app.step_fraction;
+  if (app.step >= 0 && app.step < STEP_COUNT) done += step_weight(app.step) * app.step_fraction;
   return total > 0 ? CLAMP(done / total, 0.0, 1.0) : 0.0;
 }
 
@@ -789,8 +803,12 @@ static GtkWidget *building_page(void) {
   gtk_box_pack_end(GTK_BOX(info), app.build_elapsed, FALSE, FALSE, 0);
   gtk_box_pack_start(GTK_BOX(card), info, FALSE, FALSE, 0);
   gtk_box_pack_start(GTK_BOX(card),
-                     label_new("The first build downloads about 4 GB and can take an hour or more. You can keep "
-                               "using your computer meanwhile; the game starts by itself when it's done.",
+                     label_new(app.offline
+                                   ? "Everything needed is included except one 4.8 MB download, so this usually "
+                                     "takes 15-30 minutes. You can keep using your computer meanwhile; the game "
+                                     "starts by itself when it's done."
+                                   : "The first build downloads about 4 GB and can take an hour or more. You can "
+                                     "keep using your computer meanwhile; the game starts by itself when it's done.",
                                "jfg-small"),
                      FALSE, FALSE, 0);
   GtkWidget *expander = gtk_expander_new("Show details");
@@ -892,8 +910,8 @@ static gboolean render_screenshots(char **requests) {
                                 "compile failed. Local diagnostic log: ~/.cache/jfg/appimage/…/compile.log\n");
       show_build_error();
     }
-    show_page(page);
     gtk_stack_set_transition_type(GTK_STACK(app.stack), GTK_STACK_TRANSITION_TYPE_NONE);
+    show_page(page);
     gtk_widget_queue_draw(app.window);
     for (int i = 0; i < 20; i++)
       while (gtk_events_pending()) gtk_main_iteration();
@@ -921,6 +939,7 @@ int main(int argc, char **argv) {
     {"icon", 0, 0, G_OPTION_ARG_FILENAME, &app.icon_path, "Window icon", "PATH"},
     {"build-log", 0, 0, G_OPTION_ARG_FILENAME, &app.build_log, "Build log to open on failure", "PATH"},
     {"probe", 0, 0, G_OPTION_ARG_NONE, &probe, "Exit 0 if a window can be shown", NULL},
+    {"offline", 0, 0, G_OPTION_ARG_NONE, &app.offline, "The AppImage bundles its dependencies", NULL},
     {"start-build", 0, G_OPTION_FLAG_HIDDEN, G_OPTION_ARG_NONE, &start_now,
      "Testing aid: build with the imported ROM straight away", NULL},
     {"screenshot", 0, 0, G_OPTION_ARG_STRING_ARRAY, &screenshots, "Render PAGE to FILE.png and exit",
