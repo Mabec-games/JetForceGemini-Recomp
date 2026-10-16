@@ -16,12 +16,12 @@ Options: `--rom FILE`, `--build-only`, `--rebuild`, `--version`, `--help`. If yo
 ## Requirements
 64-bit x86 Linux, a Vulkan-capable GPU/driver, an X11 session (XWayland is fine), network access for the first build, and these tools (the app prints the exact command if any are missing):
 ```sh
-sudo apt install build-essential gcc-multilib binutils-mips-linux-gnu python3-venv python3-pip pkg-config cmake ninja-build git wget libsdl2-dev libx11-dev libxrandr-dev libvulkan-dev libasound2-dev
+sudo apt install build-essential gcc-multilib binutils-mips-linux-gnu python3-venv python3-pip pkg-config cmake ninja-build git wget libsdl2-dev libx11-dev libxrandr-dev libvulkan-dev libasound2-dev libgtk-3-dev
 ```
 On Arch / CachyOS / Manjaro (multilib repo enabled; `ninja` is the package literally named `ninja`, `samurai` also works):
 
 ```
-sudo pacman -S --needed base-devel git cmake ninja python python-pip pkgconf wget sdl2 libx11 libxrandr vulkan-icd-loader vulkan-headers alsa-lib lib32-glibc lib32-gcc-libs
+sudo pacman -S --needed base-devel git cmake ninja python python-pip pkgconf wget sdl2 libx11 libxrandr vulkan-icd-loader vulkan-headers alsa-lib gtk3 lib32-glibc lib32-gcc-libs
 paru -S mips-linux-gnu-binutils   # AUR; provides mips-linux-gnu-as/objcopy
 ```
 
