@@ -2340,7 +2340,9 @@ jfg::ControllerPortSample sample_keyboard_port(const State &state,std::size_t po
   };
   auto sample=jfg::map_pc_keyboard(jfg::effective_pc_input(state.pc_experimental,state.pc_input[port]),down);
   jfg::mod::Memory memory({state.rdram,kRdramSize});
-  if(state.pc_experimental && (memory.u8(0x800FD7BDU)!=0 ||
+  // Controllers are first sampled during startup, before guest RAM exists;
+  // reading it then crashed with keyboard and mouse plus experimental controls.
+  if(state.pc_experimental && state.rdram!=nullptr && (memory.u8(0x800FD7BDU)!=0 ||
      (memory.u8(0x800A4FC4U)==0 && !jfg::mod::gameplay_active(memory,state.phase9_player_actor))))
     sample=jfg::map_pc_menu(sample,down);
   return sample;
@@ -2356,7 +2358,7 @@ void sample_controller_ports(State &state) {
   const auto devices = state.controller_ports.devices(available);
   state.pc_devices=devices;
   jfg::mod::Memory pc_memory({state.rdram,kRdramSize});
-  const bool look_active=state.pc_experimental &&
+  const bool look_active=state.pc_experimental && state.rdram!=nullptr &&
     jfg::mod::gameplay_active(pc_memory,state.phase9_player_actor) && pc_memory.u8(0x800FD7BDU)==0 &&
     !jfg::mod::scripted_camera_active(pc_memory,state.phase9_player_actor);
   for (std::size_t p = 0; p < 4; ++p) {
