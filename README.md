@@ -15,8 +15,8 @@ itself. Later launches go straight to the game.
 |---|---|---|
 | AppImage size | 3.7 MB | 144 MB |
 | Downloaded during the first build | about 4 GB | about 6 MB (the IDO compiler and the decompilation) |
-| First build takes | an hour or more, depending on your connection | about 15–30 minutes |
-| Good for | fast, reliable internet | slow or unreliable internet |
+| First build takes | about 15–30 minutes on a fast connection (longer on a slow one) | about 15–30 minutes |
+| Good for | fast internet, small download now | slow, metered or unreliable internet |
 
 Both build the same game and use the same saves.
 
