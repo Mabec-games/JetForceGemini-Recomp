@@ -99,9 +99,20 @@ build() {
   fi
   say "Building the game from your ROM. This downloads dependencies and takes a while; it only happens once."
   local log="$WORK/build.log" executable
-  if ! env -u LD_LIBRARY_PATH python3 "$SOURCE/scripts/build_from_rom.py" --rom "$ROM" \
-        --build-root "$WORK/b" 2>&1 | tee "$log"; then
-    say "Build failed. Full output: $log"; return 1
+  env -u LD_LIBRARY_PATH python3 "$SOURCE/scripts/build_from_rom.py" --rom "$ROM" \
+      --build-root "$WORK/b" 2>&1 | tee "$log"
+  if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+    local step_log
+    step_log="$(sed -n 's/.*Local diagnostic log: //p' "$log" | tail -n 1)"
+    if [ -n "$step_log" ] && [ -f "$step_log" ]; then
+      say ""
+      say "First errors from $step_log:"
+      grep -n -m 25 -E 'error:|Error|FAILED:|undefined reference' "$step_log" | cut -c1-400 >&2
+      say ""
+    fi
+    say "Build failed. Full output: $log"
+    say "When reporting this, include the error lines above and the output of: gcc --version"
+    return 1
   fi
   executable="$(sed -n 's/^Built: //p' "$log" | tail -n 1)"
   if [ -z "$executable" ] || [ ! -x "$executable" ]; then say "Build did not produce an executable. See $log"; return 1; fi
