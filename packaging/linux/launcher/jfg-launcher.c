@@ -31,6 +31,7 @@ typedef struct {
 
 static const Step kSteps[] = {
   {"unpack-offline", "Unpacking the bundled dependencies", 40},
+  {"download-decomp", "Downloading the Jet Force Gemini decompilation (under 1 MB)", 15},
   {"download-ido", "Downloading the IDO compiler (4.8 MB)", 15},
   {"clone-jfg-decomp", "Downloading the Jet Force Gemini decompilation", 120},
   {"pin-jfg-decomp", "Checking out the decompilation", 1},
@@ -286,7 +287,9 @@ static double step_weight(int i) {
   if (app.offline && (g_str_has_prefix(id, "clone-") || g_str_has_prefix(id, "pin-") ||
                       g_str_has_prefix(id, "submodules-")))
     return 1;
-  if (!app.offline && (strcmp(id, "unpack-offline") == 0 || strcmp(id, "download-ido") == 0)) return 1;
+  if (!app.offline && (strcmp(id, "unpack-offline") == 0 || strcmp(id, "download-decomp") == 0 ||
+                       strcmp(id, "download-ido") == 0))
+    return 1;
   if (app.offline && strcmp(id, "generate") == 0) return 300; /* No downloads inside it either. */
   return kSteps[i].weight;
 }
@@ -804,9 +807,9 @@ static GtkWidget *building_page(void) {
   gtk_box_pack_start(GTK_BOX(card), info, FALSE, FALSE, 0);
   gtk_box_pack_start(GTK_BOX(card),
                      label_new(app.offline
-                                   ? "Everything needed is included except one 4.8 MB download, so this usually "
-                                     "takes 15-30 minutes. You can keep using your computer meanwhile; the game "
-                                     "starts by itself when it's done."
+                                   ? "Everything needed is included except two small downloads (about 6 MB), so "
+                                     "this usually takes 15-30 minutes. You can keep using your computer "
+                                     "meanwhile; the game starts by itself when it's done."
                                    : "The first build downloads about 4 GB and can take an hour or more. You can "
                                      "keep using your computer meanwhile; the game starts by itself when it's done.",
                                "jfg-small"),

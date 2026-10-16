@@ -122,6 +122,7 @@ download() { # URL FILE
 prepare_offline() {
   [ -d "$OFFLINE/deps" ] || return 0
   local key deps marker tools repo url path ido_dir ido_url ido_sha tarball attempt python_version
+  local decomp decomp_url decomp_commit partial
   key="$(python3 -c 'import hashlib, sys; from pathlib import Path
 print(hashlib.sha256(str(Path(sys.argv[1]).resolve()).encode()).hexdigest()[:12])' "$SOURCE")" || return 1
   deps="$WORK/b/$key/d"   # Where build_from_rom.py looks for its dependencies.
@@ -136,14 +137,49 @@ print(hashlib.sha256(str(Path(sys.argv[1]).resolve()).encode()).hexdigest()[:12]
   if [ ! -f "$marker" ]; then
     echo "unpack-offline"; echo "JFG-SUPPORT setup_step=unpack-offline"
     rm -rf "$deps" && mkdir -p "$deps" && cp -a "$OFFLINE/deps/." "$deps/" || return 1
-    for repo in "$deps"/*/; do
+    for repo in "$deps"/*/; do   # The glob skips .extra (the decompilation's bundled tools).
       git -C "$repo" reset -q --hard && git -C "$repo" submodule --quiet update --init --recursive --force \
         || { say "Unpacking the bundled dependencies failed in $repo"; return 1; }
     done
+    touch "$marker"
+  fi
+
+  # The Jet Force Gemini decompilation is reconstructed game code without a
+  # license, so it is downloaded (under 1 MB, only the pinned revision) rather
+  # than bundled. Its tool submodules come from the bundle via the redirects.
+  decomp="$deps/Jet-Force-Gemini"
+  read -r decomp_url decomp_commit < <(python3 -c 'import json, sys
+r = json.load(open(sys.argv[1]))["repositories"]["Jet-Force-Gemini"]; print(r["url"], r["commit"])' \
+    "$OFFLINE/manifest.json") || return 1
+  if [ "$(git -C "$decomp" rev-parse HEAD 2>/dev/null)" != "$decomp_commit" ]; then
+    echo "download-decomp"; echo "JFG-SUPPORT setup_step=download-decomp"
+    partial="$decomp.partial"
+    for attempt in 1 2 3 4 5; do
+      rm -rf "$partial"
+      # IPv4 first, for routers that never answer IPv6 lookups (see download()).
+      if git init -q "$partial" \
+         && { git -C "$partial" fetch -q -4 --depth 1 "$decomp_url" "$decomp_commit" \
+              || git -C "$partial" fetch -q --depth 1 "$decomp_url" "$decomp_commit"; } \
+         && git -C "$partial" -c advice.detachedHead=false checkout -q --detach FETCH_HEAD \
+         && git -C "$partial" remote add origin "$decomp_url"; then
+        break
+      fi
+      rm -rf "$partial"
+      say "Downloading the decompilation did not work (attempt $attempt of 5)."
+      [ "$attempt" = 5 ] || sleep 5
+    done
+    if [ ! -d "$partial" ]; then
+      say "Decompilation download failed: the Jet Force Gemini decompilation could not be downloaded from $decomp_url. Check your internet connection and try again."
+      return 1
+    fi
+    git -C "$partial" submodule --quiet update --init --recursive \
+      || { say "Setting up the decompilation's bundled tools failed"; rm -rf "$partial"; return 1; }
+    rm -rf "$decomp" && mv "$partial" "$decomp" || return 1
+  fi
+  if [ ! -x "$tools/n64crc" ] || [ ! -x "$tools/objdiff/objdiff-cli" ]; then
     mkdir -p "$tools/objdiff" && cp "$OFFLINE/objdiff/objdiff-cli" "$tools/objdiff/" || return 1
     gcc -I "$tools" -Wall -O2 -s -std=c99 -o "$tools/n64crc" "$tools/n64crc.c" -lm \
       || { say "Building n64crc failed"; return 1; }
-    touch "$marker"
   fi
 
   ido_dir="$tools/ido-recomp/linux"
@@ -192,7 +228,7 @@ build() {
   fi
   local log="$WORK/build.log" executable
   if [ -d "$OFFLINE/deps" ]; then
-    say "Building the game from your ROM. Everything needed is included except two small downloads (about 7 MB); this takes a while and only happens once."
+    say "Building the game from your ROM. Everything needed is included except two small downloads (about 6 MB); this takes a while and only happens once."
   else
     say "Building the game from your ROM. This downloads dependencies and takes a while; it only happens once."
   fi

@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Create the offline dependency bundle for the Linux AppImage.
 
-The bundle lets the first-run build work without the network, except for the
-IDO compiler (proprietary, so it is never bundled; AppRun downloads it).
+The bundle lets the first-run build work with two small downloads (about 6 MB) instead of
+about 4 GB. Two things are never bundled and AppRun downloads them: IDO, the
+original N64 compiler (proprietary), and the Jet Force Gemini decompilation
+(reconstructed Rare/Nintendo code without a license).
 
 It contains only open-source material, each with its own license files:
-- the four pinned dependency repositories with all submodules, as shallow git
-  repositories at exactly the revisions in dependencies.lock.json;
+- three pinned dependency repositories (RT64, N64Recomp, N64ModernRuntime)
+  with all submodules, as shallow git repositories at exactly the revisions in
+  dependencies.lock.json, plus the decompilation's three tool submodules;
 - git-redirects.tsv, mapping each submodule's upstream URL to its bundled copy,
   so the build's own "git submodule update" calls stay offline;
 - objdiff-cli (MIT/Apache-2.0), which the decompilation's tool cache expects;
@@ -100,37 +103,77 @@ def bundle_submodules(source: Path, destination: Path, deps_root: Path, redirect
 
 
 LICENSE_PREFIXES = ("license", "licence", "copying", "notice", "copyright", "unlicense", "authors")
+LICENSE_DEPTH = 3  # Some bundles (e.g. RT64's Windows libraries) keep licenses in subfolders.
+# Repositories that are downloaded on first run instead of bundled (see the module docstring).
+DOWNLOADED = {"Jet-Force-Gemini"}
+EXTRA_DIR = ".extra"
+# Prebuilt binaries that ship without their license text, and where that text lives.
+EXTRA_LICENSES = {
+    "rt64/src/contrib/dxc": ("https://raw.githubusercontent.com/microsoft/DirectXShaderCompiler/main/LICENSE.TXT",
+                             "Prebuilt DirectX Shader Compiler (microsoft/DirectXShaderCompiler), which ships "
+                             "without its license text; LICENSE.TXT is that project's license."),
+}
+
+
+# Python packages whose wheels ship no license file (both MIT, per their repositories).
+PYTHON_LICENSE_SOURCES = {
+    "crunch64": "https://raw.githubusercontent.com/decompals/crunch64/main/LICENSE",
+    "pylibyaml": "https://raw.githubusercontent.com/philsphicas/pylibyaml/main/LICENSE",
+}
 
 
 def collect_licenses(repo: Path, destination: Path) -> int:
-    """Copy the license files of repo and of every submodule (top level of each)."""
-    count = 0
-    roots = [repo] + [repo / line.split()[1] for line in
-                      git("submodule", "status", "--recursive", cwd=repo).splitlines() if line.strip()]
+    """Copy license files of repo and of each submodule, up to LICENSE_DEPTH folders below each."""
+    roots = [repo]
+    if (repo / ".git").exists():
+        roots += [repo / line.split()[1] for line in
+                  git("submodule", "status", "--recursive", cwd=repo).splitlines() if line.strip()]
+    copied: set[Path] = set()
     for root in roots:
-        for item in sorted(root.iterdir()):
-            if item.is_file() and item.name.lower().startswith(LICENSE_PREFIXES):
-                target = destination / root.relative_to(repo.parent) / item.name
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(item, target)
-                count += 1
-    return count
+        for folder, subfolders, files in os.walk(root):
+            depth = len(Path(folder).relative_to(root).parts)
+            subfolders[:] = [] if depth >= LICENSE_DEPTH else [name for name in subfolders if name != ".git"]
+            for file_name in sorted(files):
+                source = Path(folder, file_name)
+                if file_name.lower().startswith(LICENSE_PREFIXES) and source.is_file() and source not in copied:
+                    target = destination / source.relative_to(repo)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source, target)
+                    copied.add(source)
+    return len(copied)
 
 
 def collect_wheel_licenses(wheels: Path, destination: Path) -> int:
+    """License files from each wheel; for wheels without any, the license its metadata declares."""
     import zipfile
+    from email.parser import Parser
     count = 0
     for wheel in sorted(wheels.glob("*.whl")):
-        project = wheel.name.split("-")[0]
+        project = wheel.name.split("-")[0].lower()
         with zipfile.ZipFile(wheel) as archive:
+            found = False
             for name in archive.namelist():
                 parts = name.split("/")
                 if ".dist-info" in parts[0] and parts[-1].lower().startswith(LICENSE_PREFIXES):
+                    found = True
                     target = destination / project / parts[-1]
                     if not target.exists():
                         target.parent.mkdir(parents=True, exist_ok=True)
                         target.write_bytes(archive.read(name))
                         count += 1
+            target = destination / project / "LICENSE-FROM-METADATA.txt"
+            if not found and not (destination / project).exists():
+                metadata_name = next(n for n in archive.namelist() if n.endswith(".dist-info/METADATA"))
+                metadata = Parser().parsestr(archive.read(metadata_name).decode("utf-8", "replace"))
+                declared = [f"License: {metadata['License']}"] if metadata["License"] else []
+                declared += [f"License-Expression: {metadata['License-Expression']}"] \
+                    if metadata["License-Expression"] else []
+                declared += [c for c in metadata.get_all("Classifier") or [] if c.startswith("License ::")]
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(f"{metadata['Name']} {metadata['Version']} ships no license file. Its "
+                                  f"package metadata declares:\n" + "\n".join(declared or ["(nothing)"]) +
+                                  f"\nHome page: {metadata['Home-page'] or metadata['Project-URL'] or '-'}\n")
+                count += 1
     return count
 
 
@@ -155,6 +198,8 @@ def restore_worktrees(deps_root: Path, names: list[str], redirects: dict[str, st
 
 def verify(deps_root: Path, manifest: dict) -> None:
     for name, info in manifest["repositories"].items():
+        if info.get("downloaded"):
+            continue
         if git("rev-parse", "HEAD", cwd=deps_root / name) != info["commit"]:
             raise RuntimeError(f"{name} restored at the wrong commit")
         status = git("submodule", "status", "--recursive", cwd=deps_root / name)
@@ -188,6 +233,8 @@ def main() -> int:
     redirects: dict[str, str] = {}
     manifest: dict = {"repositories": {}}
 
+    licenses = output / "licenses"
+    license_count = 0
     for entry in lock["repositories"]:
         if entry["id"] not in NAMES:
             continue
@@ -195,6 +242,30 @@ def main() -> int:
         source = args.deps.resolve() / name
         if git("rev-parse", "HEAD", cwd=source) != entry["commit"]:
             raise RuntimeError(f"{source} is not at the pinned commit {entry['commit']}")
+        if name in DOWNLOADED:
+            # Reconstructed game code without a license: never bundled, AppRun downloads it. Its
+            # open-source tool submodules are bundled as standalone repositories the build is
+            # redirected to.
+            print(f"Bundling only the tool submodules of {name} (the repository itself is downloaded) …",
+                  flush=True)
+            extra = deps_root / EXTRA_DIR / name
+            tools = []
+            for sub_name, path in submodules(source):
+                entry_line = git("ls-tree", "HEAD", "--", path, cwd=source).split()
+                if len(entry_line) < 3 or entry_line[1] != "commit":
+                    continue
+                url = git("config", f"submodule.{sub_name}.url", cwd=source)
+                if submodules(source / path):
+                    raise RuntimeError(f"{name}/{path} has nested submodules; bundling them is not supported")
+                shallow_repository(source / path, extra / path, entry_line[2], url)
+                redirects.setdefault(url, (extra / path).relative_to(deps_root).as_posix())
+                license_count += collect_licenses(extra / path, licenses / "repositories" / name / path)
+                strip_worktree(extra / path)
+                tools.append(path)
+            requirements_text = git("show", "HEAD:requirements.txt", cwd=source)
+            manifest["repositories"][name] = {"commit": entry["commit"], "url": entry["url"],
+                                              "downloaded": True, "bundled_submodules": tools}
+            continue
         print(f"Bundling {name} …", flush=True)
         shallow_repository(source, deps_root / name, entry["commit"], entry["url"])
         bundle_submodules(source, deps_root / name, deps_root, redirects)
@@ -203,17 +274,15 @@ def main() -> int:
             raise RuntimeError(f"{name} has submodules that are missing or at the wrong commit:\n{status}")
         manifest["repositories"][name] = {"commit": entry["commit"], "url": entry["url"],
                                           "submodules": len(status.splitlines())}
+        license_count += collect_licenses(deps_root / name, licenses / "repositories" / name)
+        strip_worktree(deps_root / name)
+    print(f"Collected {license_count} license files from the repositories and submodules.", flush=True)
 
     (output / "git-redirects.tsv").write_text(
         "".join(f"{url}\t{path}\n" for url, path in sorted(redirects.items())))
     requirements = output / "requirements.txt"
-    shutil.copy2(deps_root / "Jet-Force-Gemini/requirements.txt", requirements)
-    names = list(manifest["repositories"])
-    licenses = output / "licenses"
-    license_count = sum(collect_licenses(deps_root / name, licenses / "repositories") for name in names)
-    print(f"Collected {license_count} license files from the repositories and submodules.", flush=True)
-    for name in names:
-        strip_worktree(deps_root / name)
+    requirements.write_text(requirements_text + "\n")
+    names = [name for name, info in manifest["repositories"].items() if not info.get("downloaded")]
     with tempfile.TemporaryDirectory() as scratch:
         print("Self-test: restoring the files from the bundled git storage …", flush=True)
         trial = Path(scratch) / "deps"
@@ -253,13 +322,19 @@ def main() -> int:
                         "--platform", "manylinux2014_x86_64", "--platform", "linux_x86_64",
                         "-r", str(requirements), "-d", str(wheels)], check=True)
     shutil.copytree(objdiff_dir, licenses / "objdiff", ignore=shutil.ignore_patterns("objdiff-cli"))
+    for path, (url, note) in EXTRA_LICENSES.items():
+        download(url, licenses / "repositories" / path / Path(url).name)
+        (licenses / "repositories" / path / "NOTE.txt").write_text(note + "\n")
+    for project, url in PYTHON_LICENSE_SOURCES.items():
+        download(url, licenses / "python" / project / "LICENSE")
     print(f"Collected {collect_wheel_licenses(wheels, licenses / 'python')} license files from the Python "
           "packages.", flush=True)
     (licenses / "README.txt").write_text(
         "License files of everything bundled in this offline edition. The repositories are stored as git\n"
         "data under ../deps (restored on first run); repositories/ holds each one's and each submodule's\n"
         "license files. python/ holds the Python packages' licenses (the wheels are in ../wheels).\n"
-        "IDO is not bundled: it is proprietary and downloaded on first run.\n")
+        "Not bundled, downloaded on first run: IDO (proprietary) and the Jet Force Gemini decompilation\n"
+        "(reconstructed game code without a license; only its open-source tool submodules are bundled).\n")
     manifest["wheels"] = sorted(path.name for path in wheels.iterdir())
     manifest["pythons"] = list(args.pythons or DEFAULT_PYTHONS)
     manifest["objdiff"] = objdiff
