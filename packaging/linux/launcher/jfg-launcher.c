@@ -82,6 +82,7 @@ typedef struct {
   /* Saved choices (launcher.ini), read by AppRun when it starts the game. */
   gboolean fullscreen;
   gboolean mouse_aim;
+  gboolean mouse_look_up; /* Non-inverted mouse look: forward looks up (the game's default is inverted). */
   gboolean music_muted;
 
   /* Widgets. */
@@ -103,6 +104,7 @@ typedef struct {
   GtkWidget *mute_button;
   GtkWidget *fullscreen_switches[2];
   GtkWidget *mouse_checks[2];
+  GtkWidget *invert_checks[2];
   int settings_boxes;
 
   /* Music. */
@@ -225,6 +227,7 @@ static void settings_load(void) {
   for (char **line = lines; *line; line++) {
     if (strcmp(*line, "fullscreen=1") == 0) app.fullscreen = TRUE;
     if (strcmp(*line, "mouse_aim=1") == 0) app.mouse_aim = TRUE;
+    if (strcmp(*line, "mouse_non_inverted=1") == 0) app.mouse_look_up = TRUE;
     if (strcmp(*line, "music_muted=1") == 0) app.music_muted = TRUE;
   }
   g_strfreev(lines);
@@ -236,8 +239,9 @@ static void settings_save(void) {
   char *folder = g_path_get_dirname(app.settings_path);
   g_mkdir_with_parents(folder, 0755);
   g_free(folder);
-  char *text = g_strdup_printf("version=1\nfullscreen=%d\nmouse_aim=%d\nmusic_muted=%d\n", app.fullscreen ? 1 : 0,
-                               app.mouse_aim ? 1 : 0, app.music_muted ? 1 : 0);
+  char *text = g_strdup_printf("version=1\nfullscreen=%d\nmouse_aim=%d\nmouse_non_inverted=%d\nmusic_muted=%d\n",
+                               app.fullscreen ? 1 : 0, app.mouse_aim ? 1 : 0, app.mouse_look_up ? 1 : 0,
+                               app.music_muted ? 1 : 0);
   GError *error = NULL;
   if (!g_file_set_contents(app.settings_path, text, -1, &error)) {
     g_printerr("jfg-launcher: could not save %s: %s\n", app.settings_path, error->message);
@@ -341,6 +345,7 @@ static void on_mute(GtkButton *button, gpointer data) {
 
 static void on_fullscreen_changed(GObject *object, GParamSpec *spec, gpointer data);
 static void on_mouse_aim_toggled(GtkToggleButton *button, gpointer data);
+static void on_mouse_invert_toggled(GtkToggleButton *button, gpointer data);
 
 /* Several pages show the same controls; keep every copy in step. */
 static void sync_settings_controls(void) {
@@ -351,6 +356,10 @@ static void sync_settings_controls(void) {
     g_signal_handlers_block_by_func(app.mouse_checks[i], on_mouse_aim_toggled, NULL);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app.mouse_checks[i]), app.mouse_aim);
     g_signal_handlers_unblock_by_func(app.mouse_checks[i], on_mouse_aim_toggled, NULL);
+    g_signal_handlers_block_by_func(app.invert_checks[i], on_mouse_invert_toggled, NULL);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app.invert_checks[i]), app.mouse_look_up);
+    g_signal_handlers_unblock_by_func(app.invert_checks[i], on_mouse_invert_toggled, NULL);
+    gtk_widget_set_sensitive(app.invert_checks[i], app.mouse_aim); /* Only means something with mouse aim. */
   }
 }
 
@@ -365,6 +374,13 @@ static void on_fullscreen_changed(GObject *object, GParamSpec *spec, gpointer da
 static void on_mouse_aim_toggled(GtkToggleButton *button, gpointer data) {
   (void)data;
   app.mouse_aim = gtk_toggle_button_get_active(button);
+  sync_settings_controls();
+  settings_save();
+}
+
+static void on_mouse_invert_toggled(GtkToggleButton *button, gpointer data) {
+  (void)data;
+  app.mouse_look_up = gtk_toggle_button_get_active(button);
   sync_settings_controls();
   settings_save();
 }
@@ -392,6 +408,14 @@ static GtkWidget *settings_box_new(void) {
   gtk_style_context_add_class(gtk_widget_get_style_context(app.mouse_checks[index]), "jfg-check");
   g_signal_connect(app.mouse_checks[index], "toggled", G_CALLBACK(on_mouse_aim_toggled), NULL);
   gtk_box_pack_start(GTK_BOX(box), app.mouse_checks[index], FALSE, FALSE, 0);
+  app.invert_checks[index] = gtk_check_button_new_with_label("Play without inverted mouse look");
+  gtk_widget_set_halign(app.invert_checks[index], GTK_ALIGN_CENTER);
+  gtk_widget_set_tooltip_text(app.invert_checks[index],
+                              "On: move the mouse forward to look up. Off: forward looks down, the game's "
+                              "original inverted look.");
+  gtk_style_context_add_class(gtk_widget_get_style_context(app.invert_checks[index]), "jfg-check");
+  g_signal_connect(app.invert_checks[index], "toggled", G_CALLBACK(on_mouse_invert_toggled), NULL);
+  gtk_box_pack_start(GTK_BOX(box), app.invert_checks[index], FALSE, FALSE, 0);
   gtk_box_pack_start(GTK_BOX(box),
                      label_new("Player 1 uses keyboard and mouse: mouse to look and aim, WASD to move, left click to "
                                "fire. Untick to play with a gamepad. Experimental, single-player.",
@@ -959,6 +983,7 @@ static const char *kCss =
     "expander arrow { color: rgba(225, 225, 255, 0.85); }\n"
     ".jfg-settings { margin-top: 2px; margin-bottom: 2px; }\n"
     "checkbutton.jfg-check label { color: rgba(236, 236, 255, 0.92); font-size: 14px; }\n"
+    "checkbutton.jfg-check:disabled label { color: rgba(236, 236, 255, 0.38); }\n"
     "switch { background-image: none; background-color: rgba(255, 255, 255, 0.16);"
     "  border: 1px solid rgba(255, 255, 255, 0.3); }\n"
     "switch:checked { background-image: linear-gradient(90deg, #ff2fa8, #3d6bff); border: none; }\n"

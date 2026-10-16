@@ -282,22 +282,27 @@ build() {
 # and mouse look on and dual_stick off, so gamepads keep their normal controls.
 # Mouse aim only runs while player 1 uses keyboard and mouse (device -3); in
 # automatic mode (-1) a connected gamepad takes player 1 and mouse aim never
-# starts, so the checkbox sets player 1 to keyboard and mouse. Otherwise
-# existing files (the player's own edits) are left as they are.
+# starts, so the checkbox sets player 1 to keyboard and mouse. The game's
+# mouse_invert_y=0 is the game's inverted look (mouse forward looks down); the
+# launcher's "Play without inverted mouse look" (off by default) sets it to 1.
+# Otherwise existing files (the player's own edits) are left as they are.
 apply_launcher_settings() {
   [ -f "$SETTINGS" ] || return 0
   grep -qx 'fullscreen=1' "$SETTINGS" && export JFG_START_FULLSCREEN=1
   if grep -qx 'mouse_aim=1' "$SETTINGS"; then
+    local invert_y=0
+    grep -qx 'mouse_non_inverted=1' "$SETTINGS" && invert_y=1
     [ -s "$PROFILE/controller-1.ini" ] || printf '%s\n' version=1 device=-3 stick=0 deadzone=7849 \
       threshold=8689 trigger=3855 invert_x=0 invert_y=0 map0=0 map1=1 map2=23 map3=6 map4=11 map5=12 \
       map6=13 map7=14 map8=9 map9=10 map10=22 map11=21 map12=20 map13=19 > "$PROFILE/controller-1.ini"
     sed -i 's/^device=.*$/device=-3/' "$PROFILE/controller-1.ini"
     [ -s "$PROFILE/pc-input.ini" ] || printf '%s\n' version=3 mouse_aim=1 mouse_sensitivity=100 \
-      mouse_invert_y=0 dual_stick=0 aim_sensitivity=100 aim_deadzone=7849 aim_invert_y=0 modern=1 \
+      mouse_invert_y="$invert_y" dual_stick=0 aim_sensitivity=100 aim_deadzone=7849 aim_invert_y=0 modern=1 \
       mouse_aim_sensitivity=100 camera_sensitivity=100 aim_curve=0 mouse_vertical_sensitivity=100 \
       stick_vertical_sensitivity=100 key0=13 key1=257 key2=1 key3=9 key4=38 key5=40 key6=37 key7=39 \
       key8=256 key9=2 key10=32 key11=75 key12=74 key13=76 key14=87 key15=83 key16=65 key17=68 \
       key18=16 key19=90 > "$PROFILE/pc-input.ini"
+    sed -i "s/^mouse_invert_y=.*\$/mouse_invert_y=$invert_y/" "$PROFILE/pc-input.ini"
     printf 'version=1\nexperimental=1\n' > "$PROFILE/experimental-controls.ini"
     export JFG_CONTROLLER_CONFIG="$PROFILE/controller-1.ini"
   elif [ -f "$PROFILE/experimental-controls.ini" ]; then
