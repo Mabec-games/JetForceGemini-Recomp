@@ -103,6 +103,19 @@ add_git_config() {
   export GIT_CONFIG_COUNT=$git_config_count
 }
 
+# Some home routers never answer IPv6 (AAAA) lookups for GitHub, so every new
+# connection waits for that lookup and git clones can hang outright. Git has no
+# IPv4 switch, but http.curloptResolve hands it github.com's IPv4 address so it
+# skips the lookup; wget (used by the decompilation's tool Makefile) gets
+# inet4_only. Only when an IPv4 address exists, so IPv6-only setups still work.
+prefer_ipv4() {
+  local ip
+  ip="$(getent ahostsv4 github.com 2>/dev/null | awk 'NR == 1 { print $1 }')"
+  [ -n "$ip" ] || return 0
+  add_git_config http.curloptResolve "github.com:443:$ip"
+  printf 'inet4_only = on\n' > "$WORK/wgetrc" && export WGETRC="$WORK/wgetrc"
+}
+
 download() { # URL FILE
   # Some home routers never answer IPv6 (AAAA) lookups, so a normal attempt
   # waits for the full timeout. Try IPv4 first; fall back to the default
@@ -236,6 +249,7 @@ build() {
   # below 1 KiB/s so the user sees an error and can retry instead of a hang.
   export GIT_HTTP_LOW_SPEED_LIMIT="${GIT_HTTP_LOW_SPEED_LIMIT:-1024}"
   export GIT_HTTP_LOW_SPEED_TIME="${GIT_HTTP_LOW_SPEED_TIME:-60}"
+  prefer_ipv4
   # Not in a pipeline: prepare_offline exports the git and pip settings.
   prepare_offline > >(tee "$log") 2>&1 || { say "Build failed. Full output: $log"; return 1; }
   env -u LD_LIBRARY_PATH python3 "$SOURCE/scripts/build_from_rom.py" --rom "$ROM" \
