@@ -169,7 +169,8 @@ static void show_page(const char *name) {
   gtk_stack_set_visible_child_name(GTK_STACK(app.stack), name);
 }
 
-static void finish(int result) {
+static void finish(int result, const char *reason) {
+  if (reason) g_printerr("jfg-launcher: %s\n", reason);
   app.result = result;
   gtk_main_quit();
 }
@@ -266,7 +267,7 @@ static gboolean force_kill(gpointer data) {
 
 static void cancel_build(gboolean quit) {
   if (!app.running) {
-    if (quit) finish(1);
+    if (quit) finish(1, "closed");
     return;
   }
   app.cancelling = TRUE;
@@ -385,7 +386,7 @@ static void build_finished(void) {
   g_spawn_close_pid(app.child);
   if (app.cancelling) {
     if (app.quit_after_cancel) {
-      finish(1);
+      finish(1, "build stopped and window closed by the user");
     } else {
       app.cancelling = FALSE;
       set_status(app.welcome_status, "The build was stopped. You can start it again at any time.", NULL);
@@ -396,9 +397,10 @@ static void build_finished(void) {
   if (g_spawn_check_exit_status(app.exit_status, NULL) && app.built) {
     app.step = STEP_COUNT;
     refresh_progress();
-    finish(0);
+    finish(0, NULL);
     return;
   }
+  g_printerr("jfg-launcher: build failed: %s\n", app.failure ? app.failure : "(no message)");
   show_build_error();
 }
 
@@ -581,7 +583,7 @@ static void on_copy_tools(GtkButton *button, gpointer data) {
 static void on_close(GtkButton *button, gpointer data) {
   (void)button;
   (void)data;
-  finish(1);
+  finish(1, "closed from the error screen");
 }
 
 static void on_back(GtkButton *button, gpointer data) {
@@ -616,7 +618,7 @@ static gboolean on_delete(GtkWidget *widget, GdkEvent *event, gpointer data) {
   (void)event;
   (void)data;
   if (!app.running) {
-    finish(1);
+    finish(1, "window closed");
     return TRUE;
   }
   GtkWidget *dialog = gtk_message_dialog_new(GTK_WINDOW(app.window), GTK_DIALOG_MODAL, GTK_MESSAGE_QUESTION,

@@ -101,6 +101,10 @@ build() {
   fi
   say "Building the game from your ROM. This downloads dependencies and takes a while; it only happens once."
   local log="$WORK/build.log" executable
+  # Git waits forever on a stalled HTTPS download. Give up after 60 seconds
+  # below 1 KiB/s so the user sees an error and can retry instead of a hang.
+  export GIT_HTTP_LOW_SPEED_LIMIT="${GIT_HTTP_LOW_SPEED_LIMIT:-1024}"
+  export GIT_HTTP_LOW_SPEED_TIME="${GIT_HTTP_LOW_SPEED_TIME:-60}"
   if ! env -u LD_LIBRARY_PATH python3 "$SOURCE/scripts/build_from_rom.py" --rom "$ROM" \
         --build-root "$WORK/b" 2>&1 | tee "$log"; then
     say "Build failed. Full output: $log"; return 1
