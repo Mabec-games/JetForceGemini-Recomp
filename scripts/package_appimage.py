@@ -47,13 +47,13 @@ def make_icon(destination: Path) -> None:
 
 
 def build_launcher(destination: Path) -> None:
-    """Compile the first-run window against the system GTK 3 (no game data involved)."""
-    flags = subprocess.check_output(["pkg-config", "--cflags", "--libs", "gtk+-3.0"], text=True).split()
+    """Compile the launcher window against the system GTK 3 and SDL2 (no game data involved)."""
+    flags = subprocess.check_output(["pkg-config", "--cflags", "--libs", "gtk+-3.0", "sdl2"], text=True).split()
     destination.parent.mkdir(parents=True, exist_ok=True)
     # gnu11 keeps the binary off glibc 2.38-only C23 symbols such as __isoc23_strtol.
     subprocess.run([os.environ.get("CC", "cc"), "-std=gnu11", "-O2", "-s", "-Wall", "-Wextra",
                     "-Wno-deprecated-declarations", str(LAUNCHER / "jfg-launcher.c"), "-o", str(destination),
-                    *flags], check=True)
+                    *flags, "-lm"], check=True)
 
 
 def main() -> int:
@@ -62,6 +62,8 @@ def main() -> int:
     parser.add_argument("--appimagetool", help="Path to appimagetool (default: $APPIMAGETOOL or PATH)")
     parser.add_argument("--allow-dirty", action="store_true",
                         help="Package even if the working tree has uncommitted changes")
+    parser.add_argument("--music", type=Path,
+                        help="MP3 the launcher loops in the background (shown as NOW PLAYING: <file name>)")
     parser.add_argument("--offline-bundle", type=Path,
                         help="Output of scripts/make_offline_bundle.py; makes the offline edition, whose first "
                              "build downloads only IDO")
@@ -101,6 +103,12 @@ def main() -> int:
     background = appdir / "usr/share/jfg-recomp/launcher/background.jpg"
     background.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(LAUNCHER / "background.jpg", background)
+    if args.music:
+        if args.music.suffix.lower() != ".mp3" or not args.music.is_file():
+            raise ValueError(f"--music must be an existing .mp3 file: {args.music}")
+        music = appdir / "usr/share/jfg-recomp/launcher/music" / args.music.name
+        music.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(args.music, music)
     if args.offline_bundle:
         bundle = args.offline_bundle.resolve()
         if not (bundle / "manifest.json").is_file():

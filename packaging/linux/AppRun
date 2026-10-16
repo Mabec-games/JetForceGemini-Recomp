@@ -17,6 +17,8 @@ EXE_RECORD="$WORK/executable.path"
 ROM_SHA1="493ced9008dbe932d6e91179b68e8630cf23a023"
 LAUNCHER="$HERE/usr/bin/jfg-launcher"
 LAUNCHER_BACKGROUND="$HERE/usr/share/jfg-recomp/launcher/background.jpg"
+LAUNCHER_MUSIC="$HERE/usr/share/jfg-recomp/launcher/music"   # Optional MP3 for the launcher.
+SETTINGS="$DATA_HOME/launcher.ini"   # The launcher's saved choices, applied by play().
 # Present only in the offline edition (scripts/make_offline_bundle.py).
 OFFLINE="$HERE/usr/share/jfg-recomp/offline"
 
@@ -272,12 +274,40 @@ build() {
   printf '%s\n' "$executable" > "$EXE_RECORD"
 }
 
+# The launcher's Window/Full screen and mouse-aim choices. Mouse aim is the
+# game's own experimental keyboard-and-mouse system, which reads its settings
+# next to JFG_CONTROLLER_CONFIG. The default files below were produced with the
+# game's serializers (include/jfg/runtime/controller_mapping.hpp, pc_input.hpp):
+# the default controller mapping, the "Normal" keyboard preset with mouse aim
+# and mouse look on and dual_stick off, so gamepads keep their normal controls.
+# Existing files (the player's own edits) are never overwritten.
+apply_launcher_settings() {
+  [ -f "$SETTINGS" ] || return 0
+  grep -qx 'fullscreen=1' "$SETTINGS" && export JFG_START_FULLSCREEN=1
+  if grep -qx 'mouse_aim=1' "$SETTINGS"; then
+    [ -s "$PROFILE/controller-1.ini" ] || printf '%s\n' version=1 device=-1 stick=0 deadzone=7849 \
+      threshold=8689 trigger=3855 invert_x=0 invert_y=0 map0=0 map1=1 map2=23 map3=6 map4=11 map5=12 \
+      map6=13 map7=14 map8=9 map9=10 map10=22 map11=21 map12=20 map13=19 > "$PROFILE/controller-1.ini"
+    [ -s "$PROFILE/pc-input.ini" ] || printf '%s\n' version=3 mouse_aim=1 mouse_sensitivity=100 \
+      mouse_invert_y=0 dual_stick=0 aim_sensitivity=100 aim_deadzone=7849 aim_invert_y=0 modern=1 \
+      mouse_aim_sensitivity=100 camera_sensitivity=100 aim_curve=0 mouse_vertical_sensitivity=100 \
+      stick_vertical_sensitivity=100 key0=13 key1=257 key2=1 key3=9 key4=38 key5=40 key6=37 key7=39 \
+      key8=256 key9=2 key10=32 key11=75 key12=74 key13=76 key14=87 key15=83 key16=65 key17=68 \
+      key18=16 key19=90 > "$PROFILE/pc-input.ini"
+    printf 'version=1\nexperimental=1\n' > "$PROFILE/experimental-controls.ini"
+    export JFG_CONTROLLER_CONFIG="$PROFILE/controller-1.ini"
+  elif [ -f "$PROFILE/experimental-controls.ini" ]; then
+    printf 'version=1\nexperimental=0\n' > "$PROFILE/experimental-controls.ini"
+  fi
+}
+
 play() {
   local executable
   executable="$(cat "$EXE_RECORD")"
   mkdir -p "$PROFILE"
   # Drop any inherited JFG_* diagnostics so only the intended profile is used.
   while IFS='=' read -r name _; do case "$name" in JFG_*) unset "$name";; esac; done < <(env)
+  apply_launcher_settings
   exec "$executable" --rom "$ROM" --save "$PROFILE/jfg.flash" \
     --controller-pak "$PROFILE/controller-1.pak" --play
 }
@@ -312,10 +342,15 @@ if [ "$check_tools" = 1 ]; then preflight 2>&1; exit $?; fi
 
 [ "$rebuild" = 1 ] && rm -rf "$WORK"
 
-if [ -z "$rom_arg" ] && needs_build && launcher_available; then
-  # The window imports the ROM and runs "AppRun --build-only"; exit 0 means ready.
-  launcher_options=()
+# The launcher opens on every start: it builds the game the first time, then
+# shows a Play screen with the player's choices. Exit 0 means "play".
+if [ -z "$rom_arg" ] && { needs_build || [ "$build_only" != 1 ]; } && launcher_available; then
+  launcher_options=(--settings "$SETTINGS")
   [ -d "$OFFLINE/deps" ] && launcher_options+=(--offline)
+  needs_build || launcher_options+=(--ready)
+  for music in "$LAUNCHER_MUSIC"/*.mp3; do
+    [ -f "$music" ] && { launcher_options+=(--music "$music"); break; }
+  done
   "$LAUNCHER" --apprun "$HERE/AppRun" --rom-store "$ROM" --rom-sha1 "$ROM_SHA1" \
     --background "$LAUNCHER_BACKGROUND" --icon "$HERE/jfg-recomp.png" --build-log "$WORK/build.log" \
     "${launcher_options[@]}" || exit 1

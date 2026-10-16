@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <future>
 #include <mutex>
+#include <string_view>
 #include <thread>
 
 #include "jfg/platform/native_window.hpp"
@@ -192,6 +193,10 @@ private:
                 handle_.display = info.info.x11.display;
                 handle_.window = static_cast<std::uintptr_t>(info.info.x11.window);
                 mouse_ok_ = true;
+                // The Linux launcher's Window/Full screen switch. F11 still toggles.
+                const char* const start_fullscreen = std::getenv("JFG_START_FULLSCREEN");
+                if (visible && start_fullscreen != nullptr && std::string_view(start_fullscreen) == "1")
+                    SDL_SetWindowFullscreen(window_, static_cast<std::uint32_t>(SDL_WINDOW_FULLSCREEN_DESKTOP));
             } else {
                 // Wayland-only sessions have no Xlib surface for RT64.
                 SDL_DestroyWindow(window_);

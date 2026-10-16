@@ -5,9 +5,23 @@
  * runs "AppRun --build-only" with a progress display and exits 0 once the
  * game is ready, so AppRun can start it. Any other exit means "do not play".
  *
+ * Once the game is built the window shows a Play screen, also on every later
+ * start, with the Window/Full screen switch and the mouse-aim checkbox; AppRun
+ * reads the saved choices when it starts the game. Optional background music
+ * (an MP3 shipped next to the launcher) loops until the build completes or
+ * Play is pressed.
+ *
  * The window contains no game data; the ROM is only read to verify it.
  */
 #include <gtk/gtk.h>
+#define SDL_MAIN_HANDLED
+#include <SDL.h>
+#define MINIMP3_IMPLEMENTATION
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wsign-compare"
+#pragma GCC diagnostic ignored "-Wunused-function"
+#include "third_party/minimp3/minimp3_ex.h"
+#pragma GCC diagnostic pop
 #include <dirent.h>
 #include <errno.h>
 #include <signal.h>
@@ -22,6 +36,7 @@
 #define WINDOW_HEIGHT 620
 #define LOG_LINE_LIMIT 4000
 #define GENERATE_SUBSTEPS 23
+#define MUSIC_VOLUME 0.6
 
 typedef struct {
   const char *id;
@@ -59,7 +74,15 @@ typedef struct {
   char *background_path;
   char *icon_path;
   char *build_log;
+  char *settings_path;
+  char *music_path;
   gboolean offline;
+  gboolean ready_at_start; /* The game is already built: open on the Play screen. */
+
+  /* Saved choices (launcher.ini), read by AppRun when it starts the game. */
+  gboolean fullscreen;
+  gboolean mouse_aim;
+  gboolean music_muted;
 
   /* Widgets. */
   GtkWidget *window;
@@ -75,6 +98,17 @@ typedef struct {
   GtkWidget *build_log_view;
   GtkWidget *error_message;
   GtkWidget *error_output;
+  GtkWidget *ready_status;
+  GtkWidget *music_bar;
+  GtkWidget *mute_button;
+  GtkWidget *fullscreen_switches[2];
+  GtkWidget *mouse_checks[2];
+  int settings_boxes;
+
+  /* Music. */
+  mp3dec_ex_t music;
+  SDL_AudioDeviceID music_device;
+  gboolean music_playing;
 
   /* Build state. */
   char *selected_rom; /* NULL: build with the already imported ROM. */
@@ -173,10 +207,197 @@ static void show_page(const char *name) {
   gtk_stack_set_visible_child_name(GTK_STACK(app.stack), name);
 }
 
+static void music_stop(void);
+
 static void finish(int result, const char *reason) {
   if (reason) g_printerr("jfg-launcher: %s\n", reason);
+  music_stop();
   app.result = result;
   gtk_main_quit();
+}
+
+/* ---------- saved choices ---------- */
+
+static void settings_load(void) {
+  char *text = NULL;
+  if (!app.settings_path || !g_file_get_contents(app.settings_path, &text, NULL, NULL)) return;
+  char **lines = g_strsplit(text, "\n", -1);
+  for (char **line = lines; *line; line++) {
+    if (strcmp(*line, "fullscreen=1") == 0) app.fullscreen = TRUE;
+    if (strcmp(*line, "mouse_aim=1") == 0) app.mouse_aim = TRUE;
+    if (strcmp(*line, "music_muted=1") == 0) app.music_muted = TRUE;
+  }
+  g_strfreev(lines);
+  g_free(text);
+}
+
+static void settings_save(void) {
+  if (!app.settings_path) return;
+  char *folder = g_path_get_dirname(app.settings_path);
+  g_mkdir_with_parents(folder, 0755);
+  g_free(folder);
+  char *text = g_strdup_printf("version=1\nfullscreen=%d\nmouse_aim=%d\nmusic_muted=%d\n", app.fullscreen ? 1 : 0,
+                               app.mouse_aim ? 1 : 0, app.music_muted ? 1 : 0);
+  GError *error = NULL;
+  if (!g_file_set_contents(app.settings_path, text, -1, &error)) {
+    g_printerr("jfg-launcher: could not save %s: %s\n", app.settings_path, error->message);
+    g_error_free(error);
+  }
+  g_free(text);
+}
+
+/* ---------- music ---------- */
+
+/* Runs on SDL's audio thread; the decoder is only touched here once playing. */
+static void music_fill(void *user, Uint8 *stream, int length) {
+  (void)user;
+  mp3d_sample_t *out = (mp3d_sample_t *)stream;
+  size_t wanted = (size_t)length / sizeof(mp3d_sample_t), have = 0;
+  int restarts = 0;
+  while (have < wanted && restarts < 2) {
+    size_t got = mp3dec_ex_read(&app.music, out + have, wanted - have);
+    if (got == 0) {
+      restarts++; /* End of the track: loop from the start. */
+      if (mp3dec_ex_seek(&app.music, 0) != 0) break;
+      continue;
+    }
+    restarts = 0;
+    have += got;
+  }
+  if (have < wanted) memset(out + have, 0, (wanted - have) * sizeof(mp3d_sample_t));
+  for (size_t i = 0; i < have; i++) out[i] = (mp3d_sample_t)(out[i] * MUSIC_VOLUME);
+}
+
+static char *music_title(void) {
+  char *name = g_path_get_basename(app.music_path);
+  char *dot = strrchr(name, '.');
+  if (dot && g_ascii_strcasecmp(dot, ".mp3") == 0) *dot = '\0';
+  return name;
+}
+
+static gboolean music_start(void) {
+  if (!app.music_path || !g_file_test(app.music_path, G_FILE_TEST_IS_REGULAR)) return FALSE;
+  /* Otherwise SDL turns SIGTERM/SIGINT into SDL events nobody reads, and the
+     launcher would ignore requests to quit (logout, kill, Ctrl+C). */
+  SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
+  if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) {
+    g_printerr("jfg-launcher: no audio for music: %s\n", SDL_GetError());
+    return FALSE;
+  }
+  if (mp3dec_ex_open(&app.music, app.music_path, MP3D_SEEK_TO_SAMPLE) != 0 || app.music.info.hz <= 0 ||
+      app.music.info.channels <= 0) {
+    g_printerr("jfg-launcher: could not read the music file %s\n", app.music_path);
+    SDL_QuitSubSystem(SDL_INIT_AUDIO);
+    return FALSE;
+  }
+  SDL_AudioSpec wanted, obtained;
+  SDL_zero(wanted);
+  wanted.freq = app.music.info.hz;
+  wanted.format = AUDIO_S16SYS;
+  wanted.channels = (Uint8)app.music.info.channels;
+  wanted.samples = 4096;
+  wanted.callback = music_fill;
+  app.music_device = SDL_OpenAudioDevice(NULL, 0, &wanted, &obtained, 0);
+  if (app.music_device == 0) {
+    g_printerr("jfg-launcher: could not open audio for music: %s\n", SDL_GetError());
+    mp3dec_ex_close(&app.music);
+    SDL_QuitSubSystem(SDL_INIT_AUDIO);
+    return FALSE;
+  }
+  app.music_playing = TRUE;
+  SDL_PauseAudioDevice(app.music_device, app.music_muted ? 1 : 0);
+  return TRUE;
+}
+
+static void music_stop(void) {
+  if (app.music_playing) {
+    SDL_CloseAudioDevice(app.music_device);
+    mp3dec_ex_close(&app.music);
+    SDL_QuitSubSystem(SDL_INIT_AUDIO);
+    app.music_playing = FALSE;
+  }
+  if (app.music_bar) gtk_widget_hide(app.music_bar);
+}
+
+static void update_mute_button(void) {
+  if (!app.mute_button) return;
+  gtk_button_set_image(GTK_BUTTON(app.mute_button),
+                       gtk_image_new_from_icon_name(app.music_muted ? "audio-volume-muted-symbolic"
+                                                                    : "audio-volume-high-symbolic",
+                                                    GTK_ICON_SIZE_BUTTON));
+  gtk_widget_set_tooltip_text(app.mute_button, app.music_muted ? "Unmute the music" : "Mute the music");
+}
+
+static void on_mute(GtkButton *button, gpointer data) {
+  (void)button;
+  (void)data;
+  app.music_muted = !app.music_muted;
+  if (app.music_playing) SDL_PauseAudioDevice(app.music_device, app.music_muted ? 1 : 0);
+  update_mute_button();
+  settings_save();
+}
+
+/* ---------- Window / Full screen and mouse aim ---------- */
+
+static void on_fullscreen_changed(GObject *object, GParamSpec *spec, gpointer data);
+static void on_mouse_aim_toggled(GtkToggleButton *button, gpointer data);
+
+/* Several pages show the same controls; keep every copy in step. */
+static void sync_settings_controls(void) {
+  for (int i = 0; i < app.settings_boxes; i++) {
+    g_signal_handlers_block_by_func(app.fullscreen_switches[i], on_fullscreen_changed, NULL);
+    gtk_switch_set_active(GTK_SWITCH(app.fullscreen_switches[i]), app.fullscreen);
+    g_signal_handlers_unblock_by_func(app.fullscreen_switches[i], on_fullscreen_changed, NULL);
+    g_signal_handlers_block_by_func(app.mouse_checks[i], on_mouse_aim_toggled, NULL);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app.mouse_checks[i]), app.mouse_aim);
+    g_signal_handlers_unblock_by_func(app.mouse_checks[i], on_mouse_aim_toggled, NULL);
+  }
+}
+
+static void on_fullscreen_changed(GObject *object, GParamSpec *spec, gpointer data) {
+  (void)spec;
+  (void)data;
+  app.fullscreen = gtk_switch_get_active(GTK_SWITCH(object));
+  sync_settings_controls();
+  settings_save();
+}
+
+static void on_mouse_aim_toggled(GtkToggleButton *button, gpointer data) {
+  (void)data;
+  app.mouse_aim = gtk_toggle_button_get_active(button);
+  sync_settings_controls();
+  settings_save();
+}
+
+static GtkWidget *settings_box_new(void) {
+  int index = app.settings_boxes++;
+  GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+  gtk_style_context_add_class(gtk_widget_get_style_context(box), "jfg-settings");
+
+  GtkWidget *display = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+  gtk_widget_set_halign(display, GTK_ALIGN_CENTER);
+  GtkWidget *window_label = label_new("Window", "jfg-text");
+  app.fullscreen_switches[index] = gtk_switch_new();
+  gtk_widget_set_valign(app.fullscreen_switches[index], GTK_ALIGN_CENTER);
+  gtk_widget_set_tooltip_text(app.fullscreen_switches[index],
+                              "How the game starts. F11 still switches while playing.");
+  g_signal_connect(app.fullscreen_switches[index], "notify::active", G_CALLBACK(on_fullscreen_changed), NULL);
+  gtk_box_pack_start(GTK_BOX(display), window_label, FALSE, FALSE, 0);
+  gtk_box_pack_start(GTK_BOX(display), app.fullscreen_switches[index], FALSE, FALSE, 0);
+  gtk_box_pack_start(GTK_BOX(display), label_new("Full screen", "jfg-text"), FALSE, FALSE, 0);
+  gtk_box_pack_start(GTK_BOX(box), display, FALSE, FALSE, 0);
+
+  app.mouse_checks[index] = gtk_check_button_new_with_label("Mouse aim (keyboard & mouse)");
+  gtk_widget_set_halign(app.mouse_checks[index], GTK_ALIGN_CENTER);
+  gtk_style_context_add_class(gtk_widget_get_style_context(app.mouse_checks[index]), "jfg-check");
+  g_signal_connect(app.mouse_checks[index], "toggled", G_CALLBACK(on_mouse_aim_toggled), NULL);
+  gtk_box_pack_start(GTK_BOX(box), app.mouse_checks[index], FALSE, FALSE, 0);
+  gtk_box_pack_start(GTK_BOX(box),
+                     label_new("Mouse to look and aim, WASD to move, left click to fire. Gamepads keep their "
+                               "normal controls. Experimental, single-player.",
+                               "jfg-small"),
+                     FALSE, FALSE, 0);
+  return box;
 }
 
 /* ---------- ROM check ---------- */
@@ -414,7 +635,9 @@ static void build_finished(void) {
   if (g_spawn_check_exit_status(app.exit_status, NULL) && app.built) {
     app.step = STEP_COUNT;
     refresh_progress();
-    finish(0, NULL);
+    music_stop(); /* The music accompanies the build only. */
+    set_status(app.ready_status, "✓ Your game was built successfully.", "jfg-ok");
+    show_page("ready");
     return;
   }
   g_printerr("jfg-launcher: build failed: %s\n", app.failure ? app.failure : "(no message)");
@@ -597,6 +820,13 @@ static void on_copy_tools(GtkButton *button, gpointer data) {
   gtk_button_set_label(button, "Copied");
 }
 
+static void on_play(GtkButton *button, gpointer data) {
+  (void)button;
+  (void)data;
+  settings_save();
+  finish(0, NULL); /* AppRun starts the game with the saved choices. */
+}
+
 static void on_close(GtkButton *button, gpointer data) {
   (void)button;
   (void)data;
@@ -726,7 +956,21 @@ static const char *kCss =
     ".jfg-log textview, .jfg-log textview text { background-color: rgba(0, 0, 0, 0.6); color: #d7d7f2;"
     "  font-size: 10px; }\n"
     "expander title, expander title label { color: rgba(225, 225, 255, 0.85); }\n"
-    "expander arrow { color: rgba(225, 225, 255, 0.85); }\n";
+    "expander arrow { color: rgba(225, 225, 255, 0.85); }\n"
+    ".jfg-settings { margin-top: 2px; margin-bottom: 2px; }\n"
+    "checkbutton.jfg-check label { color: rgba(236, 236, 255, 0.92); font-size: 14px; }\n"
+    "switch { background-image: none; background-color: rgba(255, 255, 255, 0.16);"
+    "  border: 1px solid rgba(255, 255, 255, 0.3); }\n"
+    "switch:checked { background-image: linear-gradient(90deg, #ff2fa8, #3d6bff); border: none; }\n"
+    "switch slider { background-image: none; background-color: #ffffff; border: none; }\n"
+    "button.jfg-play { font-size: 20px; padding: 12px 64px; }\n"
+    ".jfg-music { background-color: rgba(10, 6, 28, 0.62); border-radius: 18px;"
+    "  border: 1px solid rgba(130, 160, 255, 0.3); padding: 4px 6px 4px 14px; }\n"
+    ".jfg-music-title { color: #ffffff; font-size: 12px; font-weight: 700; letter-spacing: 1px;"
+    "  text-shadow: 0 0 8px rgba(255, 70, 200, 0.8); }\n"
+    "button.jfg-mute { background-image: none; background-color: transparent; border: none;"
+    "  box-shadow: none; padding: 2px 6px; min-height: 0; min-width: 0; color: #ffffff; }\n"
+    "button.jfg-mute:hover { background-color: rgba(255, 255, 255, 0.14); border-radius: 12px; }\n";
 
 /* ---------- pages ---------- */
 
@@ -751,8 +995,7 @@ static GtkWidget *welcome_page(void) {
   gtk_box_pack_start(GTK_BOX(card), label_new("Mabecs Jet Force Gemini Recomp", "jfg-title"), FALSE, FALSE, 0);
   gtk_box_pack_start(GTK_BOX(card),
                      label_new("Select your Jet Force Gemini (USA) ROM to begin. The game is then built on this "
-                               "computer from your own ROM. That only happens once, and the game starts by itself "
-                               "when it's ready.",
+                               "computer from your own ROM. That only happens once; then press Play.",
                                "jfg-text"),
                      FALSE, FALSE, 0);
   app.welcome_status = label_new("", NULL);
@@ -809,13 +1052,14 @@ static GtkWidget *building_page(void) {
                      label_new(app.offline
                                    ? "Everything needed is included except two small downloads (about 6 MB), so "
                                      "this usually takes 15-30 minutes. You can keep using your computer "
-                                     "meanwhile; the game starts by itself when it's done."
-                                   : "The first build downloads about 4 GB and can take an hour or more. You can "
-                                     "keep using your computer meanwhile; the game starts by itself when it's done.",
+                                     "meanwhile; a Play button appears when it's done."
+                                   : "The first build downloads about 4 GB and usually takes 15-30 minutes. You can "
+                                     "keep using your computer meanwhile; a Play button appears when it's done.",
                                "jfg-small"),
                      FALSE, FALSE, 0);
+  gtk_box_pack_start(GTK_BOX(card), settings_box_new(), FALSE, FALSE, 0);
   GtkWidget *expander = gtk_expander_new("Show details");
-  gtk_container_add(GTK_CONTAINER(expander), log_view_new(&app.build_log_view, 170));
+  gtk_container_add(GTK_CONTAINER(expander), log_view_new(&app.build_log_view, 150));
   gtk_box_pack_start(GTK_BOX(card), expander, FALSE, FALSE, 0);
   GtkWidget *row = button_row_new();
   gtk_box_pack_start(GTK_BOX(row), button_new("Cancel", "jfg-secondary", G_CALLBACK(on_cancel_build)), FALSE,
@@ -841,6 +1085,52 @@ static GtkWidget *error_page(void) {
   return card;
 }
 
+static GtkWidget *ready_page(void) {
+  GtkWidget *card = card_new();
+  gtk_box_pack_start(GTK_BOX(card), label_new("Mabecs Jet Force Gemini Recomp", "jfg-title"), FALSE, FALSE, 0);
+  app.ready_status = label_new("", NULL);
+  gtk_widget_set_no_show_all(app.ready_status, TRUE);
+  gtk_box_pack_start(GTK_BOX(card), app.ready_status, FALSE, FALSE, 0);
+  gtk_box_pack_start(GTK_BOX(card), settings_box_new(), FALSE, FALSE, 0);
+  GtkWidget *row = button_row_new();
+  GtkWidget *play = button_new("Play", "jfg-primary", G_CALLBACK(on_play));
+  gtk_style_context_add_class(gtk_widget_get_style_context(play), "jfg-play");
+  gtk_box_pack_start(GTK_BOX(row), play, FALSE, FALSE, 0);
+  gtk_box_pack_start(GTK_BOX(card), row, FALSE, FALSE, 0);
+  gtk_box_pack_start(GTK_BOX(card),
+                     label_new("Your choices are remembered. F11 switches between window and full screen while "
+                               "playing.",
+                               "jfg-small"),
+                     FALSE, FALSE, 0);
+  return card;
+}
+
+static GtkWidget *music_bar_new(void) {
+  GtkWidget *bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+  gtk_style_context_add_class(gtk_widget_get_style_context(bar), "jfg-music");
+  gtk_widget_set_halign(bar, GTK_ALIGN_START);
+  gtk_widget_set_valign(bar, GTK_ALIGN_START);
+  gtk_widget_set_margin_start(bar, 16);
+  gtk_widget_set_margin_top(bar, 14);
+  char *title = music_title();
+  char *text = g_strdup_printf("♪  NOW PLAYING: %s", title);
+  GtkWidget *label = gtk_label_new(text);
+  gtk_label_set_ellipsize(GTK_LABEL(label), PANGO_ELLIPSIZE_END);
+  gtk_label_set_max_width_chars(GTK_LABEL(label), 100);
+  gtk_style_context_add_class(gtk_widget_get_style_context(label), "jfg-music-title");
+  g_free(text);
+  g_free(title);
+  app.mute_button = gtk_button_new();
+  gtk_style_context_add_class(gtk_widget_get_style_context(app.mute_button), "jfg-mute");
+  g_signal_connect(app.mute_button, "clicked", G_CALLBACK(on_mute), NULL);
+  update_mute_button();
+  gtk_box_pack_start(GTK_BOX(bar), label, FALSE, FALSE, 0);
+  gtk_box_pack_start(GTK_BOX(bar), app.mute_button, FALSE, FALSE, 0);
+  gtk_widget_show_all(bar);
+  gtk_widget_set_no_show_all(bar, TRUE); /* Hidden again by music_stop() without show_all undoing it. */
+  return bar;
+}
+
 static void build_ui(GtkWidget *toplevel) {
   GtkCssProvider *css = gtk_css_provider_new();
   gtk_css_provider_load_from_data(css, kCss, -1, NULL);
@@ -863,7 +1153,13 @@ static void build_ui(GtkWidget *toplevel) {
   gtk_stack_add_named(GTK_STACK(app.stack), tools_page(), "tools");
   gtk_stack_add_named(GTK_STACK(app.stack), building_page(), "building");
   gtk_stack_add_named(GTK_STACK(app.stack), error_page(), "error");
+  gtk_stack_add_named(GTK_STACK(app.stack), ready_page(), "ready");
   gtk_overlay_add_overlay(GTK_OVERLAY(overlay), app.stack);
+  if (app.music_path) {
+    app.music_bar = music_bar_new();
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), app.music_bar);
+  }
+  sync_settings_controls();
   gtk_container_add(GTK_CONTAINER(toplevel), overlay);
 
   if (app.rom_store && g_file_test(app.rom_store, G_FILE_TEST_IS_REGULAR)) {
@@ -906,6 +1202,8 @@ static gboolean render_screenshots(char **requests) {
       app.started = g_get_monotonic_time() - (gint64)2537 * G_USEC_PER_SEC;
       refresh_progress();
       text_view_set(app.build_log_view, "generate\nJFG-SUPPORT setup_step=generate\n  extract-rom\n  matching-elf\n");
+    } else if (strcmp(page, "ready") == 0) {
+      set_status(app.ready_status, "✓ Your game was built successfully.", "jfg-ok");
     } else if (strcmp(page, "error") == 0) {
       g_free(app.failure);
       app.failure = g_strdup("compile failed. Local diagnostic log: ~/.cache/jfg/appimage/…/compile.log");
@@ -943,6 +1241,9 @@ int main(int argc, char **argv) {
     {"build-log", 0, 0, G_OPTION_ARG_FILENAME, &app.build_log, "Build log to open on failure", "PATH"},
     {"probe", 0, 0, G_OPTION_ARG_NONE, &probe, "Exit 0 if a window can be shown", NULL},
     {"offline", 0, 0, G_OPTION_ARG_NONE, &app.offline, "The AppImage bundles its dependencies", NULL},
+    {"ready", 0, 0, G_OPTION_ARG_NONE, &app.ready_at_start, "The game is built: open on the Play screen", NULL},
+    {"settings", 0, 0, G_OPTION_ARG_FILENAME, &app.settings_path, "Where the player's choices are saved", "PATH"},
+    {"music", 0, 0, G_OPTION_ARG_FILENAME, &app.music_path, "MP3 to loop in the background", "PATH"},
     {"start-build", 0, G_OPTION_FLAG_HIDDEN, G_OPTION_ARG_NONE, &start_now,
      "Testing aid: build with the imported ROM straight away", NULL},
     {"screenshot", 0, 0, G_OPTION_ARG_STRING_ARRAY, &screenshots, "Render PAGE to FILE.png and exit",
@@ -962,6 +1263,8 @@ int main(int argc, char **argv) {
   app.tail = g_string_new(NULL);
   app.step = -1;
   app.result = 1;
+  settings_load();
+  if (app.music_path && !g_file_test(app.music_path, G_FILE_TEST_IS_REGULAR)) g_clear_pointer(&app.music_path, g_free);
 
   if (screenshots) {
     app.window = gtk_offscreen_window_new();
@@ -978,6 +1281,8 @@ int main(int argc, char **argv) {
   g_signal_connect(app.window, "delete-event", G_CALLBACK(on_delete), NULL);
   build_ui(app.window);
   gtk_widget_show_all(app.window);
+  if (app.ready_at_start) show_page("ready");
+  if (!music_start() && app.music_bar) gtk_widget_hide(app.music_bar);
   if (start_now) continue_to_build();
   gtk_main();
   return app.result;
