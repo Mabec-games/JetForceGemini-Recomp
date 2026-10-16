@@ -280,6 +280,9 @@ if(TARGET jfg_rt64_renderer)
     if(MSVC)
         target_compile_options(jfg_rt64_f3ddkr_texture_tests PRIVATE
             /wd4201 /wd4244 /wd4324)
+    else()
+        target_include_directories(jfg_rt64_f3ddkr_texture_tests SYSTEM PRIVATE
+            ${jfg_rt64_renderer_include_dirs})
     endif()
     if(WIN32)
         add_custom_command(TARGET jfg_rt64_f3ddkr_texture_tests POST_BUILD
@@ -304,6 +307,9 @@ if(TARGET jfg_rt64_renderer)
     if(MSVC)
         target_compile_options(jfg_rt64_depth_bounds_tests PRIVATE
             /wd4201 /wd4244 /wd4324)
+    else()
+        target_include_directories(jfg_rt64_depth_bounds_tests SYSTEM PRIVATE
+            ${jfg_rt64_renderer_include_dirs})
     endif()
     if(WIN32)
         add_custom_command(TARGET jfg_rt64_depth_bounds_tests POST_BUILD
