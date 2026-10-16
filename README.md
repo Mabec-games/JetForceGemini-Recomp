@@ -3,40 +3,91 @@
 ![Jet Force Gemini running natively on Linux](docs/images/mabec-gameplay.jpg)
 
 An unofficial Linux edition of [Jet Force Gemini Recomp](https://github.com/TK22-26/JetForceGemini-Recomp)
-by TK22-26 and the JFG Recomp contributors. Double-click the AppImage, choose your
-Jet Force Gemini (USA) ROM, and the game is built on your computer and starts by
-itself. Later launches go straight to the game.
+by TK22-26 and the JFG Recomp contributors. Double-click the AppImage and choose
+your Jet Force Gemini (USA) ROM; the game is built on your computer once, then a
+**Play** button appears. Every later start opens the launcher on the Play screen.
 
-![The first-run launcher building the game](docs/images/mabec-launcher.jpg)
+![The launcher's Play screen](docs/images/mabec-launcher-play.jpg)
 
-## Download: choose one
+## Download
 
-| | **Standard** ([JFG-Linux-Ver1](https://github.com/Mabec-games/JetForceGemini-Recomp/releases/tag/JFG-Linux-Ver1)) | **Offline** ([JFG-Linux-Ver2](https://github.com/Mabec-games/JetForceGemini-Recomp/releases/tag/JFG-Linux-Ver2)) |
+**[JFG-Linux-Ver3](https://github.com/Mabec-games/JetForceGemini-Recomp/releases/tag/JFG-Linux-Ver3) is the latest and recommended version.**
+
+| | **Ver3** (latest) | Ver2 | Ver1 |
+|---|---|---|---|
+| Launcher with Play screen, music, full screen and mouse aim options | ✅ | – | – |
+| Keyboard and mouse aiming | ✅ | – | – |
+| AppImage size | 148 MB | 144 MB | 3.7 MB |
+| Downloaded during the first build | about 6 MB | about 6 MB | about 4 GB |
+| First build takes | about 15–30 minutes | about 15–30 minutes | about 15–30 minutes on a fast connection |
+
+```
+chmod +x JFG-Linux-mabec-Ver3.appimage
+./JFG-Linux-mabec-Ver3.appimage
+```
+
+All versions use the same saves.
+
+## The launcher
+
+![The launcher building the game](docs/images/mabec-launcher.jpg)
+
+- **First start:** choose your ROM. The launcher checks it, lists any missing
+  build tools with the install command, and shows the build's progress.
+- **Play screen:** appears when the build is done and on every later start.
+- **Window ⟷ Full screen:** how the game starts. F11 still switches while playing.
+- **Mouse aim (play with keyboard & mouse):** see below.
+- **Play without inverted mouse look:** with mouse aim on, moving the mouse
+  forward looks up. Off by default, which keeps the game's original inverted look.
+- **Music:** *NOW PLAYING* in the top corner, with a mute button. It loops while
+  the launcher is open and stops when the build finishes or you press Play.
+
+All choices are remembered.
+
+## Keyboard and mouse
+
+Tick **Mouse aim (play with keyboard & mouse)** to play with keyboard and mouse.
+This turns on the game's built-in, experimental keyboard-and-mouse support
+(single-player) with its **Normal** layout. Player 1 then uses keyboard and
+mouse; untick it to play with a gamepad, which keeps its normal controls.
+
+**Tip: hold the right mouse button to aim.** While it's held, the mouse moves the
+aiming reticle directly, which is much easier than aiming the original way.
+Release it to go back to turning the camera.
+
+| Key / mouse | N64 button | In the game |
 |---|---|---|
-| AppImage size | 3.7 MB | 144 MB |
-| Downloaded during the first build | about 4 GB | about 6 MB (the IDO compiler and the decompilation) |
-| First build takes | about 15–30 minutes on a fast connection (longer on a slow one) | about 15–30 minutes |
-| Good for | fast internet, small download now | slow, metered or unreliable internet |
+| Mouse | – | Look around / turn the camera |
+| **Right mouse button (hold)** | R | **Aim**: the mouse aims directly |
+| **Left mouse button** | Z | **Fire** |
+| W, A, S, D | Control stick | Move (and strafe while aiming) |
+| Shift (hold) | – | Move at full speed |
+| Space | C-Up | Jump |
+| Mouse wheel up / down | L / B | Change weapon |
+| Tab | Start | Pause menu |
+| Enter, or the Z key | A | A button |
+| J, K, L | C-Left, C-Down, C-Right | C buttons |
+| Arrow keys | D-pad | D-pad |
+| F11 | – | Switch window / full screen |
 
-Both build the same game and use the same saves.
-
-```
-chmod +x JFG-Linux-mabec*.appimage
-./JFG-Linux-mabec-offline.appimage      # or ./JFG-Linux-mabec.appimage
-```
+In menus, the arrow keys move, **Enter** confirms and **Backspace** goes back.
+The mouse is only captured during gameplay; it is released in menus, cutscenes,
+the pause menu and when the window loses focus.
 
 ## You need
 
 - **Your own Jet Force Gemini (USA) `.z64` ROM.** The launcher checks it.
 - **Common build tools.** If any are missing, the launcher lists them with the
   install command for your distribution.
-- **Python 3.11–3.14** for the offline edition's Python packages to come from the
-  AppImage (other versions download them).
+- **Python 3.11–3.14** for the bundled Python packages (other versions download
+  them).
 
 ## What's different from upstream
 
-- A first-run launcher window: choose your ROM, see progress, and get readable
-  errors with **Try again**.
+- The launcher described above, with Play screen, music, full screen and
+  keyboard-and-mouse options.
+- Linux: mouse aim works (the game's controller settings were never passed on
+  Linux), and a crash at startup with keyboard and mouse is fixed.
 - Fixes the Linux build failing on GCC (reported upstream as
   [issue #15](https://github.com/TK22-26/JetForceGemini-Recomp/issues/15)).
 - Stalled downloads stop after 60 seconds instead of hanging, and downloads try
@@ -45,13 +96,16 @@ chmod +x JFG-Linux-mabec*.appimage
   (GTK 3 requirement check, first compiler errors on a failed build).
 - Window title: "Mabecs Jet Force Gemini Recomp".
 
+**Music:** Ver3's launcher plays *Jet Force Gemini - Main Theme (Remake by Bryan EL)*,
+a fan remake by Bryan EL of the game's main theme; the original music is by Rare.
+
 No ROM, game data or code generated from a ROM is included in this repository or
 its releases. Two things are never bundled and are downloaded on first launch:
 IDO, the original N64 compiler, which is proprietary, and the Jet Force Gemini
-decompilation, which is reconstructed game code without a license. Everything the
-offline edition bundles is open source; its license files are in the AppImage
-under `usr/share/jfg-recomp/offline/licenses`. Not affiliated with or endorsed by
-the upstream project, Rare or Nintendo.
+decompilation, which is reconstructed game code without a license. The bundled
+open-source components' license files are in the AppImage under
+`usr/share/jfg-recomp/offline/licenses`. Not affiliated with or endorsed by the
+upstream project, Rare or Nintendo.
 
 ---
 
