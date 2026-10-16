@@ -387,14 +387,14 @@ static GtkWidget *settings_box_new(void) {
   gtk_box_pack_start(GTK_BOX(display), label_new("Full screen", "jfg-text"), FALSE, FALSE, 0);
   gtk_box_pack_start(GTK_BOX(box), display, FALSE, FALSE, 0);
 
-  app.mouse_checks[index] = gtk_check_button_new_with_label("Mouse aim (keyboard & mouse)");
+  app.mouse_checks[index] = gtk_check_button_new_with_label("Mouse aim (play with keyboard & mouse)");
   gtk_widget_set_halign(app.mouse_checks[index], GTK_ALIGN_CENTER);
   gtk_style_context_add_class(gtk_widget_get_style_context(app.mouse_checks[index]), "jfg-check");
   g_signal_connect(app.mouse_checks[index], "toggled", G_CALLBACK(on_mouse_aim_toggled), NULL);
   gtk_box_pack_start(GTK_BOX(box), app.mouse_checks[index], FALSE, FALSE, 0);
   gtk_box_pack_start(GTK_BOX(box),
-                     label_new("Mouse to look and aim, WASD to move, left click to fire. Gamepads keep their "
-                               "normal controls. Experimental, single-player.",
+                     label_new("Player 1 uses keyboard and mouse: mouse to look and aim, WASD to move, left click to "
+                               "fire. Untick to play with a gamepad. Experimental, single-player.",
                                "jfg-small"),
                      FALSE, FALSE, 0);
   return box;
