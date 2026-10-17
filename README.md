@@ -94,7 +94,7 @@ the pause menu and when the window loses focus.
   IPv4 first, for routers that never answer IPv6 lookups.
 - Includes [NoahVl's Linux AppImage improvements](https://github.com/NoahVl/JetForceGemini-Recomp/tree/claude/linux-appimage)
   (GTK 3 requirement check, first compiler errors on a failed build).
-- Window title: "Mabecs Jet Force Gemini Recomp".
+
 
 **Music:** Ver3's launcher plays *Jet Force Gemini - Main Theme (Remake by Bryan EL)*,
 a fan remake by Bryan EL of the game's main theme; the original music is by Rare.
